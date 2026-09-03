@@ -7,10 +7,9 @@ pragma solidity ^0.8.28;
 ///
 /// 1. `place` reverts on slippage, the way a real venue does. That lets the tests show
 ///    a failing operation consuming only its own nonce lane.
-/// 2. Every order writes to a slot derived from its own `orderId`, so concurrent orders
-///    touch disjoint state. Independent nonces let submissions proceed in parallel;
-///    disjoint state is what lets execution proceed in parallel. Orders that share a
-///    slot still serialize inside the block no matter how their nonces are arranged.
+/// 2. Every order's primary state lives in a slot derived from its own `orderId`.
+///    The global `landedCount` is shared test instrumentation, so this contract is
+///    useful for observing order but is not a parallel-execution benchmark.
 contract MockPerpVenue {
     struct Order {
         uint256 seq; // global landing order, 0 means never landed

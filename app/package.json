@@ -4,6 +4,9 @@
   "private": true,
   "type": "module",
   "description": "Private ERC-4337 mempool and relayer pool for parallel-nonce submission on Sei",
+  "engines": {
+    "node": ">=26 <27"
+  },
   "scripts": {
     "status": "tsx src/status.ts",
     "delegate": "tsx src/delegate.ts",
@@ -13,9 +16,11 @@
     "baseline": "tsx src/baseline.ts",
     "diagram": "node scripts/diagram.mjs",
     "test": "tsx --test src/*.test.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "check": "npm run typecheck && npm test"
   },
   "dependencies": {
+    "@scure/bip39": "^1.6.0",
     "dotenv": "^17.4.2",
     "viem": "^2.56.3"
   },

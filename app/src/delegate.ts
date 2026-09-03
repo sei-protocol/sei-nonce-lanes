@@ -1,9 +1,23 @@
 import { createWalletClient, http, getAddress } from 'viem';
 import { currentDelegation } from './delegation.js';
-import { chain, explorerTx, laneAccountImpl, publicClient, rpcUrl, trader } from './env.js';
+import {
+  assertWriteNetwork,
+  chain,
+  explorerTx,
+  laneAccountImpl,
+  publicClient,
+  rpcUrl,
+  trader,
+} from './env.js';
 
 async function main() {
   if (!laneAccountImpl) throw new Error('Set LANE_ACCOUNT_IMPL in .env (run the deploy script first)');
+  await assertWriteNetwork('delegate');
+
+  const implementationCode = await publicClient.getCode({ address: laneAccountImpl });
+  if (!implementationCode) {
+    throw new Error(`LANE_ACCOUNT_IMPL ${laneAccountImpl} has no code on ${chain.name}`);
+  }
 
   console.log(`chain      ${chain.name} (${chain.id})`);
   console.log(`trader     ${trader.address}`);

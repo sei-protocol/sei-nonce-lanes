@@ -3,6 +3,8 @@ import { accountAbi, entryPointAbi, venueAbi } from './abi.js';
 import { currentDelegation } from './delegation.js';
 import {
   ENTRY_POINT,
+  assertPlainRelayers,
+  assertWriteNetwork,
   chain,
   config,
   displayRpcUrl,
@@ -25,27 +27,43 @@ let activeJournal: OperationJournal | undefined;
 
 async function main() {
   const startedAt = Date.now();
+  const configuredVenue = venueAddress;
+  const configuredImplementation = laneAccountImpl;
+  if (!configuredVenue) throw new Error('Set VENUE in .env');
+  if (!configuredImplementation) throw new Error('Set LANE_ACCOUNT_IMPL in .env');
 
   /* ------------------------------- preflight ------------------------------- */
 
+  await assertWriteNetwork('spray');
+  await assertPlainRelayers('spray');
   console.log('=== preflight ===');
   console.log(`chain          ${chain.name} (${chain.id})`);
   console.log(`rpc            ${displayRpcUrl()}`);
 
-  if (!venueAddress) throw new Error('Set VENUE in .env');
-  if (!laneAccountImpl) throw new Error('Set LANE_ACCOUNT_IMPL in .env');
-
-  const entryPointCode = await publicClient.getCode({ address: ENTRY_POINT });
+  const [entryPointCode, implementationCode, venueCode] = await Promise.all([
+    publicClient.getCode({ address: ENTRY_POINT }),
+    publicClient.getCode({ address: configuredImplementation }),
+    publicClient.getCode({ address: configuredVenue }),
+  ]);
   if (!entryPointCode) throw new Error(`No EntryPoint at ${ENTRY_POINT} on this chain`);
+  if (!implementationCode) {
+    throw new Error(`LANE_ACCOUNT_IMPL ${configuredImplementation} has no code`);
+  }
+  if (!venueCode) throw new Error(`VENUE ${configuredVenue} has no code`);
   console.log(`entryPoint     ${ENTRY_POINT} (${(entryPointCode.length - 2) / 2} bytes)`);
 
   const delegation = await currentDelegation();
   if (!delegation) throw new Error('Trading account is not delegated. Run: npm run delegate');
+  if (delegation.toLowerCase() !== configuredImplementation.toLowerCase()) {
+    throw new Error(
+      `Delegation mismatch: trader delegates to ${delegation}, but LANE_ACCOUNT_IMPL is ${configuredImplementation}`,
+    );
+  }
   console.log(`trader         ${trader.address}`);
   console.log(`delegated to   ${delegation}`);
 
   const [markPx, deposit, traderBalance, nonceBefore] = await Promise.all([
-    publicClient.readContract({ address: venueAddress, abi: venueAbi, functionName: 'markPx' }),
+    publicClient.readContract({ address: configuredVenue, abi: venueAbi, functionName: 'markPx' }),
     publicClient.readContract({
       address: ENTRY_POINT,
       abi: entryPointAbi,
@@ -56,7 +74,7 @@ async function main() {
     publicClient.getTransactionCount({ address: trader.address }),
   ]);
 
-  console.log(`venue          ${venueAddress}  mark ${formatUnits(markPx, 18)}`);
+  console.log(`venue          ${configuredVenue}  mark ${formatUnits(markPx, 18)}`);
   console.log(`trader balance ${formatEther(traderBalance)} SEI`);
   console.log(`ep deposit     ${formatEther(deposit)} SEI`);
   console.log(`trader nonce   ${nonceBefore}  <- watch this, it must not move`);
@@ -93,7 +111,7 @@ async function main() {
   console.log('\n=== build ===');
   const fees = await publicClient.estimateFeesPerGas();
   // Headroom, so the relayer is not paying more for gas than the signed op covers.
-  const maxFeePerGas = (fees.maxFeePerGas * 2n) / 1n;
+  const maxFeePerGas = fees.maxFeePerGas * 2n;
   const maxPriorityFeePerGas = fees.maxPriorityFeePerGas * 2n;
 
   // Estimate the delegated account's complete execution path on this chain.
@@ -108,7 +126,7 @@ async function main() {
   const probeAccountCall = encodeFunctionData({
     abi: accountAbi,
     functionName: 'execute',
-    args: [venueAddress, 0n, probeVenueCall],
+    args: [configuredVenue, 0n, probeVenueCall],
   });
   const estimatedCallGas = await publicClient.estimateGas({
     account: ENTRY_POINT,
@@ -206,7 +224,7 @@ async function main() {
         sender: trader.address,
         lane: slot.lane,
         seq: slot.seq,
-        target: venueAddress,
+        target: configuredVenue,
         data: encodeFunctionData({
           abi: venueAbi,
           functionName: 'place',
@@ -237,7 +255,7 @@ async function main() {
     built.push(pending);
     mempool.add(pending);
   }
-  console.log(`signed         ${pendings.length} new ops in ${signMs}ms, all in parallel`);
+  console.log(`signed         ${pendings.length} new ops in ${signMs}ms, without nonce RPCs`);
 
   // Cross-check the locally computed EIP-712 digest against the EntryPoint itself.
   // If this passes, the client-side hashing matches consensus exactly.
@@ -301,7 +319,7 @@ async function main() {
   const filled = await Promise.all(
     built.map((pending) =>
       publicClient.readContract({
-        address: venueAddress,
+        address: configuredVenue,
         abi: venueAbi,
         functionName: 'isFilled',
         args: [pending.orderId],
@@ -311,7 +329,7 @@ async function main() {
   const landingSeqs = await Promise.all(
     built.map((pending) =>
       publicClient.readContract({
-        address: venueAddress,
+        address: configuredVenue,
         abi: venueAbi,
         functionName: 'landingSeq',
         args: [pending.orderId],

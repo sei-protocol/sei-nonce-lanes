@@ -32,6 +32,9 @@ export function decodeLaneNonce(nonce: bigint): { lane: bigint; seq: bigint } {
 
 /** Two uint128 values packed into one bytes32, high bits first. */
 export function packPair(high: bigint, low: bigint): Hex {
+  const maxUint128 = (1n << 128n) - 1n;
+  if (high < 0n || high > maxUint128) throw new Error(`high value out of uint128 range: ${high}`);
+  if (low < 0n || low > maxUint128) throw new Error(`low value out of uint128 range: ${low}`);
   return toHex((high << 128n) | low, { size: 32 });
 }
 

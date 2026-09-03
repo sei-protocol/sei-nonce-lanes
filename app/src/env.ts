@@ -1,28 +1,32 @@
 import { config as loadEnv } from 'dotenv';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createPublicClient, http, type Address, type Hex } from 'viem';
+import { createPublicClient, http, parseEther, type Address, type Hex } from 'viem';
 import { privateKeyToAccount, mnemonicToAccount } from 'viem/accounts';
 import { sei, seiTestnet } from 'viem/chains';
+import {
+  assertDistinctAccounts,
+  assertMainnetWriteAllowed,
+  assertNoPublicDevelopmentCredentials,
+  readChainId,
+  readDecimal,
+  readFlag,
+  readInteger,
+  readMnemonic,
+  readOptionalAddress,
+  readPrivateKey,
+  readRpcUrl,
+} from './config.js';
 
 loadEnv({ path: resolve(dirname(fileURLToPath(import.meta.url)), '../../.env'), quiet: true });
-
-function required(name: string): string {
-  const value = process.env[name];
-  if (!value) throw new Error(`Missing ${name}. Copy .env.example to .env and fill it in.`);
-  return value;
-}
-
-function num(name: string, fallback: number): number {
-  const raw = process.env[name];
-  return raw ? Number(raw) : fallback;
-}
 
 /** The canonical ERC-4337 v0.8 singleton, already deployed on Pacific-1 and Atlantic-2. */
 export const ENTRY_POINT: Address = '0x4337084D9E255Ff0702461CF8895CE9E3b5Ff108';
 
-export const chain = num('SEI_CHAIN_ID', 1328) === 1329 ? sei : seiTestnet;
-export const rpcUrl = process.env.SEI_RPC_URL ?? chain.rpcUrls.default.http[0]!;
+export const configuredChainId = readChainId(process.env);
+export const chain = configuredChainId === 1329 ? sei : seiTestnet;
+export const rpcUrl = readRpcUrl(process.env, chain.rpcUrls.default.http[0]!);
+export const allowMainnet = readFlag(process.env, 'ALLOW_MAINNET');
 
 export const publicClient = createPublicClient({ chain, transport: http(rpcUrl) });
 
@@ -37,54 +41,147 @@ export function displayRpcUrl(url: string = rpcUrl): string {
 }
 
 /** The single funded account. Holds all inventory, signs every UserOperation. */
-export const trader = privateKeyToAccount(required('TRADER_PRIVATE_KEY') as Hex);
+const traderPrivateKey = readPrivateKey(process.env, 'TRADER_PRIVATE_KEY');
+export const trader = createTrader(traderPrivateKey);
 
 /**
  * Gas-only submitters. Each one burns its own sequential EVM nonce, so the
  * sequential-nonce constraint lives here instead of on the trading account.
- * Compromising one of these cannot move funds; it can only pay to submit
- * UserOperations that the trader already signed.
+ * Compromising one can steal that relayer's gas balance or submit operations the
+ * trader already signed, but cannot create new trader-authorized operations.
  */
-export const relayerCount = num('RELAYER_COUNT', 4);
+export const relayerCount = readInteger(process.env, 'RELAYER_COUNT', 4, { min: 1, max: 256 });
 /** Offset the derivation path when the relayer mnemonic is shared with another account. */
-export const relayerStartIndex = num('RELAYER_START_INDEX', 0);
-export const relayerAccounts = Array.from({ length: relayerCount }, (_, i) =>
-  mnemonicToAccount(required('RELAYER_MNEMONIC'), { addressIndex: relayerStartIndex + i }),
+export const relayerStartIndex = readInteger(process.env, 'RELAYER_START_INDEX', 0, {
+  min: 0,
+  max: 2_147_483_647,
+});
+const relayerMnemonic = readMnemonic(process.env, 'RELAYER_MNEMONIC');
+if (relayerStartIndex + relayerCount > 2_147_483_648) {
+  throw new Error('RELAYER_START_INDEX + RELAYER_COUNT exceeds the supported derivation range');
+}
+export const relayerAccounts = createRelayers(relayerMnemonic);
+assertDistinctAccounts(
+  trader.address,
+  relayerAccounts.map((account) => account.address),
 );
 
-export const laneAccountImpl = (process.env.LANE_ACCOUNT_IMPL ?? '') as Address;
-export const venueAddress = (process.env.VENUE ?? '') as Address;
+export const laneAccountImpl = readOptionalAddress(process.env, 'LANE_ACCOUNT_IMPL');
+export const venueAddress = readOptionalAddress(process.env, 'VENUE');
 export const operationJournalPath =
-  process.env.OPERATION_JOURNAL_PATH ??
+  process.env.OPERATION_JOURNAL_PATH?.trim() ||
   resolve(dirname(fileURLToPath(import.meta.url)), '../.state/pending-ops.json');
+
+const orders = readInteger(process.env, 'ORDERS', 24, { min: 1, max: 100_000 });
+const lanePoolSize = readInteger(process.env, 'LANE_POOL_SIZE', 32, { min: 1, max: 4_096 });
+if (orders > lanePoolSize) {
+  throw new Error(`ORDERS (${orders}) cannot exceed LANE_POOL_SIZE (${lanePoolSize})`);
+}
 
 export const config = {
   /** How many orders to fire in one run. */
-  orders: num('ORDERS', 24),
+  orders,
   /**
    * Size of the lane pool, which is also the cap on in-flight operations. One
    * lane may hold at most one in-flight op, because ops sharing a lane are
    * ordered relative to each other.
    */
-  lanePoolSize: num('LANE_POOL_SIZE', 32),
+  lanePoolSize,
   /**
    * Operations per `handleOps` call. Larger bundles amortize the base transaction
    * cost, but a bundle is a shared failure domain for *validation* errors, so
    * widening it trades isolation for gas. Set to 1 for maximum isolation.
    */
-  maxOpsPerBundle: num('MAX_OPS_PER_BUNDLE', 4),
+  maxOpsPerBundle: readInteger(process.env, 'MAX_OPS_PER_BUNDLE', Math.min(4, lanePoolSize), {
+    min: 1,
+    max: lanePoolSize,
+  }),
   /** Index of the order deliberately given an unfillable limit price, or -1 to disable. */
-  sabotageIndex: num('SABOTAGE_INDEX', 2),
+  sabotageIndex: readInteger(process.env, 'SABOTAGE_INDEX', orders > 2 ? 2 : -1, {
+    min: -1,
+    max: orders - 1,
+  }),
 
-  verificationGasLimit: BigInt(num('VERIFICATION_GAS_LIMIT', 150_000)),
-  callGasLimit: BigInt(num('CALL_GAS_LIMIT', 500_000)),
-  preVerificationGas: BigInt(num('PRE_VERIFICATION_GAS', 60_000)),
-  bundleReceiptTimeoutMs: num('BUNDLE_RECEIPT_TIMEOUT_MS', 12_000),
-  bundleMaxAttempts: num('BUNDLE_MAX_ATTEMPTS', 3),
-  replacementFeeBumpPercent: num('REPLACEMENT_FEE_BUMP_PERCENT', 25),
+  verificationGasLimit: BigInt(
+    readInteger(process.env, 'VERIFICATION_GAS_LIMIT', 150_000, { min: 1 }),
+  ),
+  callGasLimit: BigInt(readInteger(process.env, 'CALL_GAS_LIMIT', 500_000, { min: 1 })),
+  preVerificationGas: BigInt(
+    readInteger(process.env, 'PRE_VERIFICATION_GAS', 60_000, { min: 1 }),
+  ),
+  bundleReceiptTimeoutMs: readInteger(process.env, 'BUNDLE_RECEIPT_TIMEOUT_MS', 12_000, {
+    min: 1,
+  }),
+  bundleMaxAttempts: readInteger(process.env, 'BUNDLE_MAX_ATTEMPTS', 3, { min: 1 }),
+  replacementFeeBumpPercent: readInteger(
+    process.env,
+    'REPLACEMENT_FEE_BUMP_PERCENT',
+    25,
+    { min: 10, max: 1_000 },
+  ),
 } as const;
+
+export const relayerFunding = parseSeiAmount('RELAYER_FUNDING', '0.5');
+export const entryPointDeposit = parseSeiAmount('ENTRYPOINT_DEPOSIT', '1');
+
+/** Refuse to sign or send when the configured chain and RPC disagree. */
+export async function assertRpcChainMatches(): Promise<void> {
+  const actualChainId = await publicClient.getChainId();
+  if (actualChainId !== configuredChainId) {
+    throw new Error(
+      `RPC chain ID ${actualChainId} does not match SEI_CHAIN_ID=${configuredChainId}. ` +
+        'Refusing to sign for the wrong EIP-712 domain.',
+    );
+  }
+}
+
+/** Guard every CLI that signs or broadcasts a transaction. */
+export async function assertWriteNetwork(action: string): Promise<void> {
+  await assertRpcChainMatches();
+  assertNoPublicDevelopmentCredentials(rpcUrl, trader.address, relayerMnemonic);
+  assertMainnetWriteAllowed(configuredChainId, rpcUrl, allowMainnet, action);
+}
+
+/** Relayers are expected to be plain gas-only EOAs, not delegated accounts or contracts. */
+export async function assertPlainRelayers(action: string): Promise<void> {
+  for (const relayer of relayerAccounts) {
+    const code = await publicClient.getCode({ address: relayer.address });
+    if (code) {
+      throw new Error(
+        `${action} refuses relayer ${relayer.address} because the address already has code or an EIP-7702 delegation`,
+      );
+    }
+  }
+}
 
 export function explorerTx(hash: Hex): string {
   const base = chain.id === 1329 ? 'https://seiscan.io' : 'https://testnet.seiscan.io';
   return `${base}/tx/${hash}`;
+}
+
+function createTrader(privateKey: Hex) {
+  try {
+    return privateKeyToAccount(privateKey);
+  } catch {
+    throw new Error('TRADER_PRIVATE_KEY is not a valid secp256k1 private key');
+  }
+}
+
+function createRelayers(mnemonic: string) {
+  try {
+    return Array.from({ length: relayerCount }, (_, i) =>
+      mnemonicToAccount(mnemonic, { addressIndex: relayerStartIndex + i }),
+    );
+  } catch {
+    throw new Error('RELAYER_MNEMONIC is not a valid BIP-39 mnemonic');
+  }
+}
+
+function parseSeiAmount(name: string, fallback: string): bigint {
+  const value = readDecimal(process.env, name, fallback);
+  try {
+    return parseEther(value);
+  } catch {
+    throw new Error(`${name} must have at most 18 decimal places`);
+  }
 }

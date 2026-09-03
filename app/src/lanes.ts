@@ -43,6 +43,9 @@ export class LanePool {
     sender: Address,
     size: number,
   ): Promise<LanePool> {
+    if (!Number.isSafeInteger(size) || size < 1) {
+      throw new Error(`lane pool size must be a positive safe integer; received ${size}`);
+    }
     const lanes = Array.from({ length: size }, (_, i) => BigInt(i + 1));
 
     // Read sequences at startup, then track them locally. Cap concurrency so a

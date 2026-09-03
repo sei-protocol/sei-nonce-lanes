@@ -123,7 +123,9 @@ contract ParallelNonceTest is Test {
         // Reusing seq 0 is rejected: the EntryPoint already consumed it.
         PackedUserOperation[] memory stale = new PackedUserOperation[](1);
         stale[0] = _signedPlaceOp(2, 0, 302, MARK_PX);
-        vm.expectRevert(abi.encodeWithSelector(IEntryPoint.FailedOp.selector, 0, "AA25 invalid account nonce"));
+        vm.expectRevert(
+            abi.encodeWithSelector(IEntryPoint.FailedOp.selector, 0, "AA25 invalid account nonce")
+        );
         entryPoint.handleOps(stale, relayer);
 
         // seq 1 on the same lane goes through.
@@ -169,7 +171,9 @@ contract ParallelNonceTest is Test {
         PackedUserOperation[] memory successor = new PackedUserOperation[](1);
         successor[0] = _signedPlaceOp(9, 1, 612, MARK_PX);
 
-        vm.expectRevert(abi.encodeWithSelector(IEntryPoint.FailedOp.selector, 0, "AA25 invalid account nonce"));
+        vm.expectRevert(
+            abi.encodeWithSelector(IEntryPoint.FailedOp.selector, 0, "AA25 invalid account nonce")
+        );
         entryPoint.handleOps(successor, relayer);
         assertFalse(venue.isFilled(612), "stranded behind the missing seq");
 
@@ -218,7 +222,9 @@ contract ParallelNonceTest is Test {
         ops[0] = _signedPlaceOp(7, 0, 401, MARK_PX);
         ops[1] = _signedPlaceOp(7, 2, 402, MARK_PX); // gap: seq 1 is missing
 
-        vm.expectRevert(abi.encodeWithSelector(IEntryPoint.FailedOp.selector, 1, "AA25 invalid account nonce"));
+        vm.expectRevert(
+            abi.encodeWithSelector(IEntryPoint.FailedOp.selector, 1, "AA25 invalid account nonce")
+        );
         entryPoint.handleOps(ops, relayer);
 
         assertFalse(venue.isFilled(401), "bundle reverted, so nothing landed");
@@ -231,7 +237,9 @@ contract ParallelNonceTest is Test {
         ops[0] = _signedPlaceOp(7, 1, 411, MARK_PX);
         ops[1] = _signedPlaceOp(7, 0, 412, MARK_PX);
 
-        vm.expectRevert(abi.encodeWithSelector(IEntryPoint.FailedOp.selector, 0, "AA25 invalid account nonce"));
+        vm.expectRevert(
+            abi.encodeWithSelector(IEntryPoint.FailedOp.selector, 0, "AA25 invalid account nonce")
+        );
         entryPoint.handleOps(ops, relayer);
     }
 

@@ -1,5 +1,13 @@
 import { createWalletClient, formatEther, http, type Address, type Hex } from 'viem';
-import { chain, displayRpcUrl, publicClient, relayerAccounts, rpcUrl } from './env.js';
+import {
+  assertPlainRelayers,
+  assertWriteNetwork,
+  chain,
+  displayRpcUrl,
+  publicClient,
+  relayerAccounts,
+  rpcUrl,
+} from './env.js';
 
 const POLL_MS = 4_000;
 
@@ -8,6 +16,8 @@ const POLL_MS = 4_000;
  * Index 0 keeps its share minus gas; the rest are paid from that wallet.
  */
 async function main() {
+  await assertWriteNetwork('dispense');
+  await assertPlainRelayers('dispense');
   if (relayerAccounts.length === 0) throw new Error('No relayers configured');
 
   const bank = relayerAccounts[0]!;

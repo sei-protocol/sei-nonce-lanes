@@ -45,6 +45,9 @@ export class PrivateMempool {
    * lane pool already guarantees one in-flight op per lane; this is a second latch.
    */
   takeBundle(max: number): PendingOp[] {
+    if (!Number.isSafeInteger(max) || max < 1) {
+      throw new Error(`bundle size must be a positive safe integer; received ${max}`);
+    }
     const bundle: PendingOp[] = [];
     const lanes = new Set<bigint>();
     const deferred: PendingOp[] = [];

@@ -1,5 +1,12 @@
 import { createWalletClient, http } from 'viem';
-import { chain, publicClient, relayerAccounts, rpcUrl } from './env.js';
+import {
+  assertPlainRelayers,
+  assertWriteNetwork,
+  chain,
+  publicClient,
+  relayerAccounts,
+  rpcUrl,
+} from './env.js';
 
 /**
  * Demonstrates the constraint being worked around, live on Sei, using a gas-only
@@ -12,6 +19,8 @@ import { chain, publicClient, relayerAccounts, rpcUrl } from './env.js';
  * the same value as `"latest"`, so there is no pending-nonce view to reason about.
  */
 async function main() {
+  await assertWriteNetwork('baseline');
+  await assertPlainRelayers('baseline');
   const account = relayerAccounts[0];
   if (!account) throw new Error('No relayer configured');
 
