@@ -1,0 +1,26 @@
+{
+  "name": "sei-parallel-nonce-app",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Private ERC-4337 mempool and relayer pool for parallel-nonce submission on Sei",
+  "scripts": {
+    "status": "tsx src/status.ts",
+    "delegate": "tsx src/delegate.ts",
+    "fund": "tsx src/fund.ts",
+    "spray": "tsx src/spray.ts",
+    "baseline": "tsx src/baseline.ts",
+    "diagram": "node scripts/diagram.mjs",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "dotenv": "^17.4.2",
+    "viem": "^2.56.3"
+  },
+  "devDependencies": {
+    "@types/node": "^26.4.1",
+    "roughjs": "^4.6.6",
+    "tsx": "^4.23.13",
+    "typescript": "^7.0.2"
+  }
+}
