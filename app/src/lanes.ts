@@ -45,16 +45,15 @@ export class LanePool {
   ): Promise<LanePool> {
     const lanes = Array.from({ length: size }, (_, i) => BigInt(i + 1));
 
-    // One batched read of every lane's current sequence. Everything after this is local.
-    const nonces = await Promise.all(
-      lanes.map((lane) =>
-        client.readContract({
-          address: entryPoint,
-          abi: entryPointAbi,
-          functionName: 'getNonce',
-          args: [sender, lane],
-        }),
-      ),
+    // Read sequences at startup, then track them locally. Cap concurrency so a
+    // public RPC does not rate-limit a 32-lane pool.
+    const nonces = await mapPool(lanes, 4, (lane) =>
+      client.readContract({
+        address: entryPoint,
+        abi: entryPointAbi,
+        functionName: 'getNonce',
+        args: [sender, lane],
+      }),
     );
 
     return new LanePool(
@@ -71,6 +70,22 @@ export class LanePool {
 
   get inFlightCount(): number {
     return this.inFlight.size;
+  }
+
+  sequence(lane: bigint): bigint | undefined {
+    return this.nextSeq.get(lane);
+  }
+
+  /** Reserve a specific lane while recovering a durable pending operation. */
+  reserve(lane: bigint, seq: bigint): void {
+    const current = this.nextSeq.get(lane);
+    if (current === undefined) throw new Error(`lane ${lane} is outside the configured pool`);
+    if (current !== seq) throw new Error(`lane ${lane} is at seq ${current}, pending op expects ${seq}`);
+    if (this.inFlight.has(lane)) throw new Error(`lane ${lane} is already in flight`);
+    const availableIndex = this.available.indexOf(lane);
+    if (availableIndex === -1) throw new Error(`lane ${lane} is not available`);
+    this.available.splice(availableIndex, 1);
+    this.inFlight.add(lane);
   }
 
   /** Reserve a lane. Returns undefined when every lane already has an op in flight. */
@@ -97,16 +112,29 @@ export class LanePool {
 
   /** Re-read sequences from chain. Use after an ambiguous failure. */
   async resync(lanes: bigint[] = [...this.nextSeq.keys()]): Promise<void> {
-    const nonces = await Promise.all(
-      lanes.map((lane) =>
-        this.client.readContract({
-          address: this.entryPoint,
-          abi: entryPointAbi,
-          functionName: 'getNonce',
-          args: [this.sender, lane],
-        }),
-      ),
+    const nonces = await mapPool(lanes, 4, (lane) =>
+      this.client.readContract({
+        address: this.entryPoint,
+        abi: entryPointAbi,
+        functionName: 'getNonce',
+        args: [this.sender, lane],
+      }),
     );
     lanes.forEach((lane, i) => this.nextSeq.set(lane, decodeLaneNonce(nonces[i]!).seq));
   }
+}
+
+async function mapPool<T, R>(items: T[], concurrency: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const out: R[] = new Array(items.length);
+  let next = 0;
+  await Promise.all(
+    Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+      for (;;) {
+        const i = next++;
+        if (i >= items.length) return;
+        out[i] = await fn(items[i]!);
+      }
+    }),
+  );
+  return out;
 }

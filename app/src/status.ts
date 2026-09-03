@@ -5,10 +5,10 @@ import {
   ENTRY_POINT,
   chain,
   config,
+  displayRpcUrl,
   laneAccountImpl,
   publicClient,
   relayerAccounts,
-  rpcUrl,
   trader,
   venueAddress,
 } from './env.js';
@@ -16,7 +16,7 @@ import { decodeLaneNonce } from './userop.js';
 
 async function main() {
   console.log(`chain            ${chain.name} (${chain.id})`);
-  console.log(`rpc              ${rpcUrl}`);
+  console.log(`rpc              ${displayRpcUrl()}`);
   console.log(`block            ${await publicClient.getBlockNumber()}`);
 
   const entryPointCode = await publicClient.getCode({ address: ENTRY_POINT });

@@ -26,6 +26,16 @@ export const rpcUrl = process.env.SEI_RPC_URL ?? chain.rpcUrls.default.http[0]!;
 
 export const publicClient = createPublicClient({ chain, transport: http(rpcUrl) });
 
+/** Safe for logs: preserves the host but hides credential-bearing URL paths. */
+export function displayRpcUrl(url: string = rpcUrl): string {
+  try {
+    const parsed = new URL(url);
+    return parsed.pathname === '/' && !parsed.search ? parsed.origin : `${parsed.origin}/…`;
+  } catch {
+    return '[configured RPC]';
+  }
+}
+
 /** The single funded account. Holds all inventory, signs every UserOperation. */
 export const trader = privateKeyToAccount(required('TRADER_PRIVATE_KEY') as Hex);
 
@@ -44,6 +54,9 @@ export const relayerAccounts = Array.from({ length: relayerCount }, (_, i) =>
 
 export const laneAccountImpl = (process.env.LANE_ACCOUNT_IMPL ?? '') as Address;
 export const venueAddress = (process.env.VENUE ?? '') as Address;
+export const operationJournalPath =
+  process.env.OPERATION_JOURNAL_PATH ??
+  resolve(dirname(fileURLToPath(import.meta.url)), '../.state/pending-ops.json');
 
 export const config = {
   /** How many orders to fire in one run. */
@@ -64,12 +77,14 @@ export const config = {
   sabotageIndex: num('SABOTAGE_INDEX', 2),
 
   verificationGasLimit: BigInt(num('VERIFICATION_GAS_LIMIT', 150_000)),
-  callGasLimit: BigInt(num('CALL_GAS_LIMIT', 250_000)),
+  callGasLimit: BigInt(num('CALL_GAS_LIMIT', 500_000)),
   preVerificationGas: BigInt(num('PRE_VERIFICATION_GAS', 60_000)),
+  bundleReceiptTimeoutMs: num('BUNDLE_RECEIPT_TIMEOUT_MS', 12_000),
+  bundleMaxAttempts: num('BUNDLE_MAX_ATTEMPTS', 3),
+  replacementFeeBumpPercent: num('REPLACEMENT_FEE_BUMP_PERCENT', 25),
 } as const;
 
 export function explorerTx(hash: Hex): string {
-  const base = chain.id === 1329 ? 'https://seitrace.com/tx' : 'https://seitrace.com/tx';
-  const suffix = chain.id === 1329 ? '?chain=pacific-1' : '?chain=atlantic-2';
-  return `${base}/${hash}${suffix}`;
+  const base = chain.id === 1329 ? 'https://seiscan.io' : 'https://testnet.seiscan.io';
+  return `${base}/tx/${hash}`;
 }

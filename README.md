@@ -61,6 +61,7 @@ script/Deploy.s.sol        Deploys the implementation and the venue.
 app/src/lanes.ts           Lane pool: local sequence tracking, one in-flight op per lane.
 app/src/mempool.ts         Private alt-mempool.
 app/src/relayers.ts        Pool of gas-only submitters.
+app/src/journal.ts         Durable signed-op and same-nonce replacement journal.
 app/src/spray.ts           Fires N independent orders and reports what happened.
 app/src/baseline.ts        Demonstrates the sequential constraint for contrast.
 ```
@@ -229,6 +230,16 @@ silent fallback into a loud validation failure. Ordered admin work uses
 **No nonce reads on the hot path.** Lane sequences are read once at startup and
 tracked locally, so signing 24 ops costs zero RPC round-trips. This matters on
 Sei specifically, where pending-nonce queries return the confirmed value.
+
+**Outer transaction eviction is recovered at the same nonce.** Signed
+UserOperations and each signed outer transaction are atomically journaled before
+broadcast. If a receipt does not arrive, the relayer first rebroadcasts the exact
+bytes, then sends fee-bumped replacements with the same EVM nonce. It never moves
+to nonce `n+1` while nonce `n` might still land. If the bounded retry budget is
+exhausted, the process stops with the bundle intact; the next `npm run spray`
+reconciles lane and relayer nonces and gets a fresh replacement budget before it
+creates new work. A lock prevents two spray processes from using the journal at
+the same time.
 
 **Independent nonces are not independent execution.** Two ops that touch the same
 storage still serialize inside the block, whatever their nonces look like. That

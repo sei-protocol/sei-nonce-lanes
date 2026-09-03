@@ -8,9 +8,11 @@
     "status": "tsx src/status.ts",
     "delegate": "tsx src/delegate.ts",
     "fund": "tsx src/fund.ts",
+    "dispense": "tsx src/dispense.ts",
     "spray": "tsx src/spray.ts",
     "baseline": "tsx src/baseline.ts",
     "diagram": "node scripts/diagram.mjs",
+    "test": "tsx --test src/*.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

@@ -1,22 +1,27 @@
-import { encodeFunctionData, formatEther, formatUnits } from 'viem';
-import { entryPointAbi, venueAbi } from './abi.js';
+import { encodeFunctionData, formatEther, formatUnits, type Hex } from 'viem';
+import { accountAbi, entryPointAbi, venueAbi } from './abi.js';
 import { currentDelegation } from './delegation.js';
 import {
   ENTRY_POINT,
   chain,
   config,
+  displayRpcUrl,
   explorerTx,
   laneAccountImpl,
+  operationJournalPath,
   publicClient,
   relayerAccounts,
   rpcUrl,
   trader,
   venueAddress,
 } from './env.js';
+import { OperationJournal } from './journal.js';
 import { LanePool } from './lanes.js';
 import { PrivateMempool, type PendingOp } from './mempool.js';
-import { RelayerPool } from './relayers.js';
+import { RelayerPool, type BundleResult } from './relayers.js';
 import { buildOp, signUserOp, userOpHash } from './userop.js';
+
+let activeJournal: OperationJournal | undefined;
 
 async function main() {
   const startedAt = Date.now();
@@ -25,7 +30,7 @@ async function main() {
 
   console.log('=== preflight ===');
   console.log(`chain          ${chain.name} (${chain.id})`);
-  console.log(`rpc            ${rpcUrl}`);
+  console.log(`rpc            ${displayRpcUrl()}`);
 
   if (!venueAddress) throw new Error('Set VENUE in .env');
   if (!laneAccountImpl) throw new Error('Set LANE_ACCOUNT_IMPL in .env');
@@ -56,12 +61,27 @@ async function main() {
   console.log(`ep deposit     ${formatEther(deposit)} SEI`);
   console.log(`trader nonce   ${nonceBefore}  <- watch this, it must not move`);
 
+  const journal = await OperationJournal.open(operationJournalPath, {
+    chainId: chain.id,
+    entryPoint: ENTRY_POINT,
+    sender: trader.address,
+  });
+  await journal.acquireLock();
+  activeJournal = journal;
+  console.log(`journal        ${journal.size} pending op(s)`);
+
   const relayerPool = await RelayerPool.create(
     relayerAccounts,
     publicClient,
     chain,
     rpcUrl,
     ENTRY_POINT,
+    {
+      journal,
+      receiptTimeoutMs: config.bundleReceiptTimeoutMs,
+      maxAttempts: config.bundleMaxAttempts,
+      feeBumpPercent: config.replacementFeeBumpPercent,
+    },
   );
   for (const { address, balance } of await relayerPool.balances()) {
     if (balance === 0n) throw new Error(`Relayer ${address} has no gas. Run: npm run fund`);
@@ -76,25 +96,111 @@ async function main() {
   const maxFeePerGas = (fees.maxFeePerGas * 2n) / 1n;
   const maxPriorityFeePerGas = fees.maxPriorityFeePerGas * 2n;
 
+  // Estimate the delegated account's complete execution path on this chain.
+  // Sei charges materially more than Ethereum for these storage writes, so a
+  // static Ethereum-sized call limit can make every otherwise-valid op run OOG.
+  const runId = BigInt(Date.now());
+  const probeVenueCall = encodeFunctionData({
+    abi: venueAbi,
+    functionName: 'place',
+    args: [runId * 1000n + BigInt(config.orders + 1), 10n ** 18n, markPx],
+  });
+  const probeAccountCall = encodeFunctionData({
+    abi: accountAbi,
+    functionName: 'execute',
+    args: [venueAddress, 0n, probeVenueCall],
+  });
+  const estimatedCallGas = await publicClient.estimateGas({
+    account: ENTRY_POINT,
+    to: trader.address,
+    data: probeAccountCall,
+  });
+  const recommendedCallGas = (estimatedCallGas * 125n + 99n) / 100n;
+  const callGasLimit =
+    config.callGasLimit > recommendedCallGas ? config.callGasLimit : recommendedCallGas;
+  console.log(
+    `call gas       ${callGasLimit} (estimate ${estimatedCallGas}, configured ${config.callGasLimit})`,
+  );
+
   const lanePool = await LanePool.create(publicClient, ENTRY_POINT, trader.address, config.lanePoolSize);
   console.log(`lane pool      ${config.lanePoolSize} lanes, ${lanePool.idleCount} idle`);
 
-  // Unique per run so repeat runs never collide on the venue's DuplicateOrder check.
-  const runId = BigInt(Date.now());
+  const durableRunOps = journal.runOps();
+  const pendingAtStartup = journal.allOps();
+  const pendingAtStartupHashes = new Set(pendingAtStartup.map((pending) => pending.hash));
+  const knownConsumed = new Set<Hex>(
+    durableRunOps
+      .filter((pending) => !pendingAtStartupHashes.has(pending.hash))
+      .map((pending) => pending.hash),
+  );
+
+  // Reconcile the durable queue before signing anything new. If a prior outer
+  // transaction landed just before a crash, its advanced lane nonce is the
+  // authoritative completion signal.
+  const alreadyConsumed: PendingOp[] = [];
+  for (const pending of pendingAtStartup) {
+    const current = lanePool.sequence(pending.lane);
+    if (current === undefined) throw new Error(`journal lane ${pending.lane} is outside the pool`);
+    if (current > pending.seq) {
+      alreadyConsumed.push(pending);
+      knownConsumed.add(pending.hash);
+      continue;
+    }
+    if (current < pending.seq) {
+      throw new Error(`journal lane ${pending.lane} expects seq ${pending.seq}, chain is at ${current}`);
+    }
+    lanePool.reserve(pending.lane, pending.seq);
+  }
+  if (alreadyConsumed.length > 0) {
+    await journal.complete(alreadyConsumed);
+    console.log(`reconciled     ${alreadyConsumed.length} op(s) already consumed on chain`);
+  }
+
+  const completedRecoveryResults: BundleResult[] = [];
+  const recoveryGroups = journal.recoveryBundles();
+  if (recoveryGroups.length > 0) {
+    console.log(`recovering     ${recoveryGroups.length} interrupted bundle(s)`);
+    const recoveredResults = await relayerPool.recover(recoveryGroups, async (result) => {
+      if (result.mined) {
+        for (const pending of result.ops) lanePool.settle(pending.lane, true);
+        await journal.complete(result.ops);
+      } else if (!result.pending) {
+        // Its outer nonce is definitively clear/consumed and no lane advanced.
+        // Keep the signed UserOps queued, but discard stale outer transactions.
+        await journal.clearAttempts(result.ops);
+      }
+    });
+    completedRecoveryResults.push(...recoveredResults.filter((result) => result.mined));
+    const unresolved = recoveredResults.filter((result) => result.pending);
+    if (unresolved.length > 0) {
+      throw new Error(
+        `${unresolved.length} interrupted bundle(s) remain ambiguous; refusing to create duplicate work`,
+      );
+    }
+  }
+
   const mempool = new PrivateMempool();
-  const built: PendingOp[] = [];
+  const built: PendingOp[] = [...durableRunOps];
+  const queued = journal.queuedOps();
+  for (const pending of queued) {
+    mempool.add(pending);
+  }
+  if (queued.length > 0) console.log(`requeued       ${queued.length} durable pending op(s)`);
+
+  const ordersToBuild = Math.min(Math.max(config.orders - built.length, 0), lanePool.idleCount);
 
   const signStart = Date.now();
   const pendings = await Promise.all(
-    Array.from({ length: config.orders }, async (_, i) => {
+    Array.from({ length: ordersToBuild }, async (_, i) => {
       const slot = lanePool.acquire();
       if (!slot) throw new Error(`lane pool exhausted at order ${i}; raise LANE_POOL_SIZE`);
 
-      const sabotaged = i === config.sabotageIndex;
+      const orderIndex = built.length + i;
+      const sabotaged = orderIndex === config.sabotageIndex;
       // A limit price under the mark makes the venue revert with Slippage, which is
       // the realistic "this one op fails" case.
       const limitPx = sabotaged ? markPx - 1n : markPx;
-      const orderId = runId * 1000n + BigInt(i);
+      const orderId = runId * 1000n + BigInt(orderIndex);
 
       const unsigned = buildOp({
         sender: trader.address,
@@ -107,7 +213,7 @@ async function main() {
           args: [orderId, 10n ** 18n, limitPx],
         }),
         verificationGasLimit: config.verificationGasLimit,
-        callGasLimit: config.callGasLimit,
+        callGasLimit,
         preVerificationGas: config.preVerificationGas,
         maxFeePerGas,
         maxPriorityFeePerGas,
@@ -126,50 +232,71 @@ async function main() {
   );
   const signMs = Date.now() - signStart;
 
+  await journal.add(pendings);
   for (const pending of pendings) {
     built.push(pending);
     mempool.add(pending);
   }
-  console.log(`signed         ${pendings.length} ops in ${signMs}ms, all in parallel, no RPC calls`);
+  console.log(`signed         ${pendings.length} new ops in ${signMs}ms, all in parallel`);
 
   // Cross-check the locally computed EIP-712 digest against the EntryPoint itself.
   // If this passes, the client-side hashing matches consensus exactly.
-  const onChainHash = await publicClient.readContract({
-    address: ENTRY_POINT,
-    abi: entryPointAbi,
-    functionName: 'getUserOpHash',
-    args: [built[0]!.op],
-  });
-  if (onChainHash !== built[0]!.hash) {
-    throw new Error(`userOpHash mismatch: local ${built[0]!.hash} vs chain ${onChainHash}`);
+  if (built.length > 0) {
+    const onChainHash = await publicClient.readContract({
+      address: ENTRY_POINT,
+      abi: entryPointAbi,
+      functionName: 'getUserOpHash',
+      args: [built[0]!.op],
+    });
+    if (onChainHash !== built[0]!.hash) {
+      throw new Error(`userOpHash mismatch: local ${built[0]!.hash} vs chain ${onChainHash}`);
+    }
+    console.log(`hash check     local digest matches EntryPoint.getUserOpHash`);
   }
-  console.log(`hash check     local digest matches EntryPoint.getUserOpHash`);
 
   /* -------------------------------- submit -------------------------------- */
 
   console.log('\n=== submit ===');
-  console.log(`${config.orders} ops -> bundles of <=${config.maxOpsPerBundle} -> ${relayerAccounts.length} relayers\n`);
+  console.log(`${built.length} ops -> bundles of <=${config.maxOpsPerBundle} -> ${relayerAccounts.length} relayers\n`);
 
   const submitStart = Date.now();
-  const results = await relayerPool.drain(mempool, config.maxOpsPerBundle, (result) => {
-    // Release lanes as soon as each bundle resolves. A mined bundle consumed every
-    // sequence in it, even for ops whose execution reverted. A bundle that never
-    // mined consumed nothing.
-    for (const pending of result.ops) lanePool.settle(pending.lane, result.mined);
+  const submittedResults = await relayerPool.drain(mempool, config.maxOpsPerBundle, async (result) => {
+    if (result.mined) {
+      // A successful handleOps consumes every lane, including execution reverts.
+      for (const pending of result.ops) lanePool.settle(pending.lane, true);
+      await journal.complete(result.ops);
+    } else if (!result.pending) {
+      // No lane was consumed and no same-nonce outer transaction can still land.
+      for (const pending of result.ops) lanePool.settle(pending.lane, false);
+      await journal.clearAttempts(result.ops);
+    }
 
-    const where = result.txHash ? `block ${result.blockNumber}` : (result.error ?? 'failed');
+    const where =
+      result.blockNumber !== undefined
+        ? `block ${result.blockNumber}`
+        : result.pending
+          ? 'pending recovery'
+          : (result.error ?? 'failed');
     const lanes = result.ops.map((o) => o.lane).join(',');
     console.log(
-      `  ${result.mined ? 'mined  ' : 'FAILED '} lanes [${lanes}]  ${where}` +
+      `  ${result.mined ? 'mined  ' : result.pending ? 'PENDING' : 'FAILED '} lanes [${lanes}]  ${where}` +
         (result.txHash ? `  gas ${result.gasUsed}` : ''),
     );
   });
+  const results = [...completedRecoveryResults, ...submittedResults];
+  await journal.flush();
   const submitMs = Date.now() - submitStart;
 
   /* -------------------------------- report -------------------------------- */
 
   console.log('\n=== per-order outcome ===');
   const byHash = new Map(results.flatMap((r) => [...r.opSuccess].map(([h, ok]) => [h, { r, ok }] as const)));
+  const landedHashes = new Set<Hex>(knownConsumed);
+  for (const result of results) {
+    if (result.mined) {
+      for (const pending of result.ops) landedHashes.add(pending.hash);
+    }
+  }
 
   const filled = await Promise.all(
     built.map((pending) =>
@@ -195,7 +322,8 @@ async function main() {
   console.log('  #  lane  seq  exec      filled  land#  block     note');
   built.forEach((pending, i) => {
     const outcome = byHash.get(pending.hash);
-    const exec = !outcome ? 'not mined' : outcome.ok ? 'ok       ' : 'reverted ';
+    const landed = landedHashes.has(pending.hash);
+    const exec = !landed ? 'not mined' : filled[i] ? 'ok       ' : 'reverted ';
     const block = outcome?.r.blockNumber?.toString() ?? '-';
     console.log(
       `  ${String(i).padStart(2)}  ${String(pending.lane).padStart(4)}  ${String(pending.seq).padStart(3)}  ` +
@@ -203,10 +331,16 @@ async function main() {
     );
   });
 
-  const minedOps = built.filter((p) => byHash.has(p.hash));
-  const succeeded = minedOps.filter((p) => byHash.get(p.hash)!.ok);
-  const reverted = minedOps.filter((p) => !byHash.get(p.hash)!.ok);
-  const blocks = new Set(results.filter((r) => r.mined).map((r) => r.blockNumber!.toString()));
+  const minedOps = built.filter((pending) => landedHashes.has(pending.hash));
+  const succeeded = built.filter((pending, i) => landedHashes.has(pending.hash) && filled[i]);
+  const reverted = built.filter((pending, i) => landedHashes.has(pending.hash) && !filled[i]);
+  const pendingBundles = results.filter((result) => result.pending);
+  const failedBundles = results.filter((result) => !result.mined && !result.pending);
+  const blocks = new Set(
+    results
+      .filter((result) => result.blockNumber !== undefined)
+      .map((result) => result.blockNumber!.toString()),
+  );
   const nonceAfter = await publicClient.getTransactionCount({ address: trader.address });
 
   console.log('\n=== summary ===');
@@ -215,26 +349,51 @@ async function main() {
   console.log(`  executed ok        ${succeeded.length}`);
   console.log(`  reverted on chain  ${reverted.length}  (each consumed only its own lane)`);
   console.log(`bundles              ${results.length} across ${blocks.size} block(s)`);
+  console.log(`  pending recovery   ${pendingBundles.length}`);
+  console.log(`  failed safely      ${failedBundles.length}`);
+  console.log(`journal pending      ${journal.size}`);
   console.log(`distinct lanes       ${new Set(built.map((p) => p.lane.toString())).size}`);
   console.log(`relayers used        ${new Set(results.map((r) => r.relayer)).size}`);
   console.log(`sign time            ${signMs}ms`);
   console.log(`submit time          ${submitMs}ms`);
-  console.log(`throughput           ${(built.length / (submitMs / 1000)).toFixed(1)} ops/sec end to end`);
+  console.log(`throughput           ${(minedOps.length / (submitMs / 1000)).toFixed(1)} landed ops/sec`);
   console.log('');
   console.log(`trader EVM nonce     ${nonceBefore} -> ${nonceAfter}  ${nonceBefore === nonceAfter ? 'UNCHANGED' : 'MOVED (unexpected)'}`);
   console.log(`total wall time      ${Date.now() - startedAt}ms`);
 
-  if (reverted.length > 0) {
+  const sabotaged = built.find((pending) => pending.label.includes('sabotaged'));
+  if (
+    sabotaged &&
+    landedHashes.has(sabotaged.hash) &&
+    !filled[built.indexOf(sabotaged)] &&
+    succeeded.length > 0
+  ) {
     console.log('');
     console.log(`The sabotaged order reverted and its neighbours still landed. That is the`);
     console.log(`property you wanted: nothing queues behind a failure.`);
   }
 
   const firstTx = results.find((r) => r.txHash)?.txHash;
-  if (firstTx) console.log(`\nfirst bundle: ${explorerTx(firstTx)}`);
+  if (firstTx) console.log(`\nexample bundle: ${explorerTx(firstTx)}`);
+
+  if (pendingBundles.length > 0 || failedBundles.length > 0) {
+    throw new Error(`${pendingBundles.length + failedBundles.length} bundle(s) require recovery`);
+  }
+
+  await journal.finishRun();
 }
 
-main().catch((error) => {
-  console.error(error);
-  process.exit(1);
-});
+main()
+  .catch((error) => {
+    console.error(error);
+    process.exitCode = 1;
+  })
+  .finally(async () => {
+    try {
+      await activeJournal?.flush();
+      await activeJournal?.releaseLock();
+    } catch (error) {
+      console.error(`failed to release operation journal lock: ${String(error)}`);
+      process.exitCode = 1;
+    }
+  });
