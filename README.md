@@ -32,6 +32,7 @@ The expected EntryPoint is the canonical v0.8 singleton at
 - [Quick verification](#quick-verification)
 - [End-to-end local run](#end-to-end-local-run)
 - [Run on Atlantic-2](#run-on-atlantic-2)
+- [Real SEI/native-USDC load test](#real-seinative-usdc-load-test)
 - [Runtime walkthrough](#runtime-walkthrough)
 - [Failure and recovery semantics](#failure-and-recovery-semantics)
 - [Commands](#commands)
@@ -207,6 +208,9 @@ remains single-threaded.
 │   │   ├── relayers.ts          Bundle simulation, submission, and recovery
 │   │   ├── spray.ts             End-to-end orchestrator and report
 │   │   ├── status.ts            Read-only network/account preflight
+│   │   ├── swap-config.ts       Atlantic-2 DragonSwap and swap settings
+│   │   ├── swap-setup.ts        Native-USDC approval and liquidity setup
+│   │   ├── swap-spray.ts        Parallel real-swap orchestrator and report
 │   │   └── userop.ts            UserOperation packing, hashing, and signing
 │   ├── scripts/diagram.mjs      Generates the architecture SVG
 │   └── package.json             CLI and verification scripts
@@ -394,6 +398,43 @@ The app's mutating commands block remote Pacific-1 writes unless
 `SEI_CHAIN_ID=1329` run; it does not guard the separate Forge deployment command
 or make this demo production-ready.
 
+## Real SEI/native-USDC load test
+
+The optional real-swap path uses the documented DragonSwap V1 deployment and
+Circle-issued native USDC on Atlantic-2. It is hard-blocked on every other
+chain. Obtain testnet USDC from the [Circle Faucet](https://faucet.circle.com/)
+for the configured trader, then run:
+
+```bash
+cd app
+npm run swap:setup
+npm run swap:spray
+```
+
+`swap:setup` uses ordinary trader transactions to approve a limited amount of
+USDC and create/seed the WSEI/USDC pair if the factory has no live pair. The
+approval covers the larger of the configured run requirement and
+`SWAP_RETAINED_USDC_ALLOWANCE`. The defaults seed 100 SEI and 100 USDC. This is
+public testnet liquidity, not a private fixture.
+
+`swap:spray` alternates tiny native SEI -> native USDC and native USDC -> native
+SEI swaps through independent ERC-4337 lanes. It reports execution outcomes
+from EntryPoint events instead of issuing one RPC read per swap. `ORDERS`,
+`LANE_POOL_SIZE`, `MAX_OPS_PER_BUNDLE`, and `SABOTAGE_INDEX` control the run:
+
+```bash
+ORDERS=3000 \
+LANE_POOL_SIZE=3000 \
+MAX_OPS_PER_BUNDLE=4 \
+SABOTAGE_INDEX=2 \
+npm run swap:spray
+```
+
+The configured trader must hold enough of both assets for every input-side swap
+to execute regardless of landing order. One deliberately impossible minimum
+output demonstrates that a slippage revert does not strand neighboring lanes.
+Set `SABOTAGE_INDEX=-1` when measuring maximum throughput.
+
 ## Runtime walkthrough
 
 `app/src/spray.ts` is the orchestrator.
@@ -549,7 +590,9 @@ same-nonce replacement budget is then available. The worker never sends nonce
 
 The journal uses restricted file permissions and temp-file replacement to
 survive normal process crashes. It is not a replicated database and does not
-claim durability through disk, kernel, or host failure.
+claim durability through disk, kernel, or host failure. Journal version 2 stores
+each signed outer transaction once per bundle rather than duplicating it in
+every operation record; version 1 files migrate automatically.
 
 ## Commands
 
@@ -562,6 +605,8 @@ Run npm commands from `app/`.
 | `npm run fund` | Yes | Use trader transactions to top up relayers and `EntryPoint.depositTo(trader)` |
 | `npm run dispense` | Yes | Wait for relayer 0 to receive SEI, then split it across relayers |
 | `npm run spray` | Yes | Build, journal, bundle, submit, recover, and report UserOperations |
+| `npm run swap:setup` | Yes | Approve native USDC and seed the Atlantic-2 DragonSwap V1 pair |
+| `npm run swap:spray` | Yes | Submit alternating real SEI/native-USDC swaps through nonce lanes |
 | `npm run baseline` | Yes | Probe sequential EVM nonce-gap behavior with a gas-only relayer |
 | `npm run diagram` | No chain write | Regenerate `assets/how-it-works.svg` |
 | `npm test` | No | Run Node unit tests |
@@ -635,6 +680,20 @@ configuration instead of silently submitting fewer orders than requested.
 | `BUNDLE_MAX_ATTEMPTS` | `3` | Positive same-nonce attempt count per process invocation |
 | `REPLACEMENT_FEE_BUMP_PERCENT` | `25` | Fee increase per replacement; accepted range `10..1000` |
 | `OPERATION_JOURNAL_PATH` | `app/.state/pending-ops.json` | Durable signed-operation journal |
+| `SENDER_RUN_LOCK_PATH` | account-specific file in `app/.state` | Shared lock across every lane workflow for one trader |
+
+### Real-swap path
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `SWAP_SEI_AMOUNT` | `0.0001` | Native SEI input for each SEI -> USDC swap |
+| `SWAP_USDC_AMOUNT` | `0.0001` | Native USDC input for each USDC -> SEI swap |
+| `SWAP_LIQUIDITY_SEI` | `100` | Native SEI supplied by `swap:setup` for a new pair |
+| `SWAP_LIQUIDITY_USDC` | `100` | Native USDC supplied by `swap:setup` for a new pair |
+| `SWAP_RETAINED_USDC_ALLOWANCE` | `10` | Minimum router allowance left after initial liquidity |
+| `SWAP_SLIPPAGE_BPS` | `500` | Minimum-output tolerance, in basis points |
+| `SWAP_DEADLINE_SECONDS` | `7200` | Signed swap deadline from build time |
+| `SWAP_OPERATION_JOURNAL_PATH` | `app/.state/pending-swaps.json` | Separate durable real-swap journal |
 
 ## Tuning
 
@@ -659,6 +718,13 @@ Larger pools:
 
 Execution reverts remain per-operation even when several operations share a
 bundle.
+
+The relayer caps signed transaction gas below the live block gas limit and
+rejects a bundle when its estimate cannot fit. On Atlantic-2 on September 3,
+2026, the real-swap path sustained 77 operations per bundle; 78 reached the
+12,500,000 block-gas ceiling and failed safely during simulation. Width 76
+produced the best observed submission rate, 47.7 landed swaps/second. These are
+measurements for this call shape and network state, not stable protocol limits.
 
 ### Relayer count
 
@@ -792,8 +858,15 @@ Run `npm run status` and resolve the cause before widening bundles or retrying.
 
 ### Journal lock is owned by another process
 
-Only one `spray` process may use a journal. Stop the other process. A lock whose
+Only one lane-based process may use a trader at a time, even when `spray` and
+`swap:spray` use different journals. Stop the other process. A lock whose
 recorded PID is no longer alive is removed automatically on the next run.
+
+### `AA95 out of gas` while widening bundles
+
+The bundle no longer fits the current block gas limit. No operation in a bundle
+that fails simulation is broadcast or consumed. Rerun with a smaller
+`MAX_OPS_PER_BUNDLE`; the durable queue will be repacked at the smaller width.
 
 ### A bundle remains in pending recovery
 

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -38,6 +38,7 @@ test('persists signed ops and raw outer transactions across restart', async () =
     assert.deepEqual(reopened.recoveryBundles(), [
       { bundleId: attempt.bundleId, ops: [pending], attempts: [attempt] },
     ]);
+    assert.deepEqual(reopened.completedBundles(), []);
 
     await reopened.complete([pending]);
     assert.equal(reopened.size, 0);
@@ -45,6 +46,9 @@ test('persists signed ops and raw outer transactions across restart', async () =
     assert.deepEqual(reopened.allOps(), []);
     assert.deepEqual(reopened.queuedOps(), []);
     assert.deepEqual(reopened.recoveryBundles(), []);
+    assert.deepEqual(reopened.completedBundles(), [
+      { bundleId: attempt.bundleId, ops: [pending], attempts: [attempt] },
+    ]);
 
     const completedReopen = await OperationJournal.open(path, {
       chainId: 1328,
@@ -53,9 +57,13 @@ test('persists signed ops and raw outer transactions across restart', async () =
     });
     assert.equal(completedReopen.size, 0);
     assert.deepEqual(completedReopen.runOps(), [pending]);
+    assert.deepEqual(completedReopen.completedBundles(), [
+      { bundleId: attempt.bundleId, ops: [pending], attempts: [attempt] },
+    ]);
 
     await completedReopen.finishRun();
     assert.deepEqual(completedReopen.runOps(), []);
+    assert.deepEqual(completedReopen.completedBundles(), []);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -75,6 +83,75 @@ test('prevents concurrent journal owners and releases the lock', async () => {
 
     await second.acquireLock();
     await second.releaseLock();
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('stores one signed outer transaction per bundle instead of per operation', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'sei-op-journal-'));
+  const path = join(directory, 'pending.json');
+  try {
+    const first = makePending();
+    const second: PendingOp = {
+      ...makePending(),
+      op: { ...makePending().op, nonce: 2n << 64n },
+      hash: `0x${'55'.repeat(32)}`,
+      lane: 2n,
+    };
+    const attempt = makeAttempt();
+    const journal = await OperationJournal.open(path, {
+      chainId: 1328,
+      entryPoint: ENTRY_POINT,
+      sender: SENDER,
+    });
+    await journal.add([first, second]);
+    await journal.recordAttempt([first, second], attempt);
+
+    const persisted = await readFile(path, 'utf8');
+    assert.equal(persisted.match(/"rawTransaction":/g)?.length, 1);
+    assert.deepEqual(journal.recoveryBundles(), [
+      { bundleId: attempt.bundleId, ops: [first, second], attempts: [attempt] },
+    ]);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('migrates legacy duplicated-attempt journals', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'sei-op-journal-'));
+  const path = join(directory, 'pending.json');
+  try {
+    const first = makePending();
+    const second: PendingOp = {
+      ...makePending(),
+      op: { ...makePending().op, nonce: 2n << 64n },
+      hash: `0x${'55'.repeat(32)}`,
+      lane: 2n,
+    };
+    const attempt = makeAttempt();
+    const legacy = {
+      version: 1,
+      context: { chainId: 1328, entryPoint: ENTRY_POINT, sender: SENDER },
+      records: [
+        { pending: first, attempts: [attempt] },
+        { pending: second, attempts: [attempt] },
+      ],
+    };
+    await writeFile(
+      path,
+      JSON.stringify(legacy, (_key, value) =>
+        typeof value === 'bigint' ? { $bigint: value.toString() } : value,
+      ),
+    );
+
+    const journal = await OperationJournal.open(path, legacy.context);
+    assert.deepEqual(journal.recoveryBundles(), [
+      { bundleId: attempt.bundleId, ops: [first, second], attempts: [attempt] },
+    ]);
+    const migrated = await readFile(path, 'utf8');
+    assert.equal(JSON.parse(migrated).version, 2);
+    assert.equal(migrated.match(/"rawTransaction":/g)?.length, 1);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

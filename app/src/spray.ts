@@ -14,6 +14,7 @@ import {
   publicClient,
   relayerAccounts,
   rpcUrl,
+  senderRunLockPath,
   trader,
   venueAddress,
 } from './env.js';
@@ -21,9 +22,11 @@ import { OperationJournal } from './journal.js';
 import { LanePool } from './lanes.js';
 import { PrivateMempool, type PendingOp } from './mempool.js';
 import { RelayerPool, type BundleResult } from './relayers.js';
+import { SenderRunLock } from './run-lock.js';
 import { buildOp, signUserOp, userOpHash } from './userop.js';
 
 let activeJournal: OperationJournal | undefined;
+let activeSenderLock: SenderRunLock | undefined;
 
 async function main() {
   const startedAt = Date.now();
@@ -36,6 +39,7 @@ async function main() {
 
   await assertWriteNetwork('spray');
   await assertPlainRelayers('spray');
+  activeSenderLock = await SenderRunLock.acquire(senderRunLockPath);
   console.log('=== preflight ===');
   console.log(`chain          ${chain.name} (${chain.id})`);
   console.log(`rpc            ${displayRpcUrl()}`);
@@ -412,6 +416,12 @@ main()
       await activeJournal?.releaseLock();
     } catch (error) {
       console.error(`failed to release operation journal lock: ${String(error)}`);
+      process.exitCode = 1;
+    }
+    try {
+      await activeSenderLock?.release();
+    } catch (error) {
+      console.error(`failed to release sender-wide run lock: ${String(error)}`);
       process.exitCode = 1;
     }
   });

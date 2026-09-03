@@ -66,6 +66,7 @@ export class RelayerPool {
     private readonly publicClient: PublicClient,
     private readonly chain: Chain,
     private readonly entryPoint: Address,
+    private readonly blockGasLimit: bigint,
     private readonly options: Required<Omit<RelayerPoolOptions, 'journal'>> & Pick<RelayerPoolOptions, 'journal'>,
   ) {}
 
@@ -77,23 +78,29 @@ export class RelayerPool {
     entryPoint: Address,
     options: RelayerPoolOptions = {},
   ): Promise<RelayerPool> {
-    const relayers = await Promise.all(
-      accounts.map(async (account) => ({
-        account,
-        wallet: createWalletClient({ account, chain, transport: http(rpcUrl) }),
-        nonce: 0,
-      })),
-    );
+    const blockGasLimit = (await publicClient.getBlock()).gasLimit;
+    const relayers = accounts.map((account) => ({
+      account,
+      wallet: createWalletClient({ account, chain, transport: http(rpcUrl) }),
+      nonce: 0,
+    }));
     // Sequential nonce reads: a 32-relayer pool otherwise bursts the public RPC.
     for (const relayer of relayers) {
       relayer.nonce = await publicClient.getTransactionCount({ address: relayer.account.address });
     }
-    return new RelayerPool(relayers, publicClient, chain, entryPoint, {
-      journal: options.journal,
-      receiptTimeoutMs: options.receiptTimeoutMs ?? 12_000,
-      maxAttempts: Math.max(1, options.maxAttempts ?? 3),
-      feeBumpPercent: Math.max(10, options.feeBumpPercent ?? 25),
-    });
+    return new RelayerPool(
+      relayers,
+      publicClient,
+      chain,
+      entryPoint,
+      blockGasLimit,
+      {
+        journal: options.journal,
+        receiptTimeoutMs: options.receiptTimeoutMs ?? 12_000,
+        maxAttempts: Math.max(1, options.maxAttempts ?? 3),
+        feeBumpPercent: Math.max(10, options.feeBumpPercent ?? 25),
+      },
+    );
   }
 
   get addresses(): Address[] {
@@ -275,6 +282,20 @@ export class RelayerPool {
         opSuccess: new Map(),
       };
     }
+    const outerGasLimit = boundedOuterGasLimit(gas, this.blockGasLimit);
+    if (outerGasLimit === undefined) {
+      return {
+        relayer: relayer.account.address,
+        ops: bundle,
+        mined: false,
+        pending: previousAttempts.length > 0,
+        txHashes: attempts.map((attempt) => attempt.txHash),
+        error:
+          `estimated bundle gas ${gas} does not fit the current block gas limit ` +
+          `${this.blockGasLimit}`,
+        opSuccess: new Map(),
+      };
+    }
 
     const estimatedFees = await this.publicClient.estimateFeesPerGas();
     const networkMaxFeePerGas = maxBigInt(estimatedFees.maxFeePerGas * 2n, 1n);
@@ -302,7 +323,7 @@ export class RelayerPool {
         relayer,
         args,
         txNonce,
-        (gas * 12n + 9n) / 10n,
+        outerGasLimit,
         maxFeePerGas,
         maxPriorityFeePerGas,
         bundleId,
@@ -527,6 +548,16 @@ function maxBigInt(a: bigint, b: bigint): bigint {
 
 function bumpFee(value: bigint, percent: number): bigint {
   return (value * BigInt(100 + percent) + 99n) / 100n;
+}
+
+export function boundedOuterGasLimit(
+  estimatedGas: bigint,
+  blockGasLimit: bigint,
+): bigint | undefined {
+  if (blockGasLimit <= 1n || estimatedGas >= blockGasLimit) return undefined;
+  const gasWithHeadroom = (estimatedGas * 12n + 9n) / 10n;
+  const maximumTransactionGas = blockGasLimit - 1n;
+  return gasWithHeadroom < maximumTransactionGas ? gasWithHeadroom : maximumTransactionGas;
 }
 
 function isAlreadyKnown(error: unknown): boolean {

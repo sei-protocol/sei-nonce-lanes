@@ -23,16 +23,35 @@ export type SubmissionAttempt = {
   createdAt: number;
 };
 
-type JournalRecord = {
+type LegacyJournalRecord = {
   pending: PendingOp;
   attempts: SubmissionAttempt[];
   completed?: boolean;
 };
 
-type JournalState = {
+type LegacyJournalState = {
   version: 1;
   context: JournalContext;
+  records: LegacyJournalRecord[];
+};
+
+type JournalRecord = {
+  pending: PendingOp;
+  bundleId?: string;
+  completed?: boolean;
+};
+
+type JournalBundle = {
+  bundleId: string;
+  opHashes: Hex[];
+  attempts: SubmissionAttempt[];
+};
+
+type JournalState = {
+  version: 2;
+  context: JournalContext;
   records: JournalRecord[];
+  bundles: JournalBundle[];
 };
 
 export type RecoveryBundle = {
@@ -59,23 +78,35 @@ export class OperationJournal {
   ) {}
 
   static async open(path: string, context: JournalContext): Promise<OperationJournal> {
-    let state: JournalState = { version: 1, context, records: [] };
+    let state: JournalState = { version: 2, context, records: [], bundles: [] };
+    let migrated = false;
     try {
-      state = JSON.parse(await readFile(path, 'utf8'), reviveBigInt) as JournalState;
-      if (state.version !== 1 || !Array.isArray(state.records)) {
+      const parsed = JSON.parse(
+        await readFile(path, 'utf8'),
+        reviveBigInt,
+      ) as JournalState | LegacyJournalState;
+      if (
+        (parsed.version !== 1 && parsed.version !== 2) ||
+        !Array.isArray(parsed.records) ||
+        (parsed.version === 2 && !Array.isArray(parsed.bundles))
+      ) {
         throw new Error(`unsupported journal format in ${path}`);
       }
-      if (state.records.length > 0 && !sameContext(state.context, context)) {
+      if (parsed.records.length > 0 && !sameContext(parsed.context, context)) {
         throw new Error(
-          `journal belongs to chain ${state.context.chainId}, sender ${state.context.sender}; ` +
+          `journal belongs to chain ${parsed.context.chainId}, sender ${parsed.context.sender}; ` +
             `refusing to replay it on chain ${context.chainId}, sender ${context.sender}`,
         );
       }
+      state = parsed.version === 1 ? migrateLegacyState(parsed) : parsed;
+      migrated = parsed.version === 1;
       state.context = context;
     } catch (error) {
       if (!isFileNotFound(error)) throw error;
     }
-    return new OperationJournal(path, state);
+    const journal = new OperationJournal(path, state);
+    if (migrated) await journal.persist();
+    return journal;
   }
 
   get size(): number {
@@ -140,28 +171,23 @@ export class OperationJournal {
 
   queuedOps(): PendingOp[] {
     return this.state.records
-      .filter((record) => !record.completed && record.attempts.length === 0)
+      .filter((record) => !record.completed && record.bundleId === undefined)
       .map((record) => record.pending);
   }
 
   recoveryBundles(): RecoveryBundle[] {
-    const groups = new Map<string, RecoveryBundle>();
-    for (const record of this.state.records) {
-      if (record.completed) continue;
-      const latest = record.attempts.at(-1);
-      if (!latest) continue;
-      const group = groups.get(latest.bundleId);
-      if (group) {
-        group.ops.push(record.pending);
-        continue;
-      }
-      groups.set(latest.bundleId, {
-        bundleId: latest.bundleId,
-        ops: [record.pending],
-        attempts: [...record.attempts],
-      });
-    }
-    return [...groups.values()];
+    return groupBundles(
+      this.state.records.filter((record) => !record.completed),
+      this.state.bundles,
+    );
+  }
+
+  /** Completed bundles retain their attempts until reporting finishes after a restart. */
+  completedBundles(): RecoveryBundle[] {
+    return groupBundles(
+      this.state.records.filter((record) => record.completed),
+      this.state.bundles,
+    );
   }
 
   /** Every operation in the current run, including ones completed before a crash. */
@@ -178,7 +204,7 @@ export class OperationJournal {
     const known = new Set(this.state.records.map((record) => record.pending.hash));
     for (const pending of ops) {
       if (known.has(pending.hash)) continue;
-      this.state.records.push({ pending, attempts: [] });
+      this.state.records.push({ pending });
       known.add(pending.hash);
     }
     await this.persist();
@@ -186,23 +212,53 @@ export class OperationJournal {
 
   async recordAttempt(ops: PendingOp[], attempt: SubmissionAttempt): Promise<void> {
     const hashes = new Set(ops.map((pending) => pending.hash));
-    let matched = 0;
-    for (const record of this.state.records) {
-      if (!hashes.has(record.pending.hash)) continue;
-      record.attempts.push(attempt);
-      matched += 1;
+    const opHashes = [...hashes];
+    const matched = this.state.records.filter((record) => hashes.has(record.pending.hash));
+    if (matched.length !== hashes.size) {
+      throw new Error(`cannot record bundle attempt: ${hashes.size - matched.length} op(s) are missing from journal`);
     }
-    if (matched !== hashes.size) {
-      throw new Error(`cannot record bundle attempt: ${hashes.size - matched} op(s) are missing from journal`);
+    for (const record of matched) {
+      if (record.bundleId !== undefined && record.bundleId !== attempt.bundleId) {
+        throw new Error(
+          `operation ${record.pending.hash} already belongs to bundle ${record.bundleId}`,
+        );
+      }
+    }
+    const existingBundle = this.state.bundles.find(
+      (candidate) => candidate.bundleId === attempt.bundleId,
+    );
+    if (existingBundle && !sameHashes(existingBundle.opHashes, opHashes)) {
+      throw new Error(`bundle ${attempt.bundleId} operation set changed across attempts`);
+    }
+    const bundle: JournalBundle = existingBundle ?? {
+      bundleId: attempt.bundleId,
+      opHashes,
+      attempts: [],
+    };
+    for (const record of matched) record.bundleId = attempt.bundleId;
+    if (!existingBundle) this.state.bundles.push(bundle);
+    if (!bundle.attempts.some((candidate) => candidate.txHash === attempt.txHash)) {
+      bundle.attempts.push(attempt);
     }
     await this.persist();
   }
 
   async clearAttempts(ops: PendingOp[]): Promise<void> {
     const hashes = new Set(ops.map((pending) => pending.hash));
+    const bundleIds = new Set<string>();
     for (const record of this.state.records) {
-      if (hashes.has(record.pending.hash)) record.attempts = [];
+      if (!hashes.has(record.pending.hash)) continue;
+      if (record.bundleId !== undefined) bundleIds.add(record.bundleId);
+      record.bundleId = undefined;
     }
+    const referenced = new Set(
+      this.state.records
+        .map((record) => record.bundleId)
+        .filter((bundleId): bundleId is string => bundleId !== undefined),
+    );
+    this.state.bundles = this.state.bundles.filter(
+      (bundle) => !bundleIds.has(bundle.bundleId) || referenced.has(bundle.bundleId),
+    );
     await this.persist();
   }
 
@@ -221,6 +277,7 @@ export class OperationJournal {
   async finishRun(): Promise<void> {
     if (this.size !== 0) throw new Error(`cannot finish run with ${this.size} pending op(s)`);
     this.state.records = [];
+    this.state.bundles = [];
     await this.persist();
   }
 
@@ -229,9 +286,12 @@ export class OperationJournal {
   }
 
   private persist(): Promise<void> {
-    const snapshot = JSON.stringify(this.state, replaceBigInt, 2) + '\n';
     const sequence = this.writeSequence++;
     this.writeChain = this.writeChain.then(async () => {
+      // Snapshot only when this write reaches the front of the chain. Creating
+      // snapshots eagerly retains one full journal string per concurrent
+      // relayer and can exhaust the Node heap for wide bundles.
+      const snapshot = JSON.stringify(this.state, replaceBigInt, 2) + '\n';
       await mkdir(dirname(this.path), { recursive: true });
       const temporary = `${this.path}.${process.pid}.${sequence}.tmp`;
       await writeFile(temporary, snapshot, { encoding: 'utf8', mode: 0o600 });
@@ -239,6 +299,72 @@ export class OperationJournal {
     });
     return this.writeChain;
   }
+}
+
+function groupBundles(
+  records: JournalRecord[],
+  bundles: JournalBundle[],
+): RecoveryBundle[] {
+  const groups = new Map<string, RecoveryBundle>();
+  const attemptsByBundle = new Map(
+    bundles.map((bundle) => [bundle.bundleId, bundle.attempts] as const),
+  );
+  for (const record of records) {
+    if (record.bundleId === undefined) continue;
+    const attempts = attemptsByBundle.get(record.bundleId);
+    if (!attempts || attempts.length === 0) continue;
+    const group = groups.get(record.bundleId);
+    if (group) {
+      group.ops.push(record.pending);
+      continue;
+    }
+    groups.set(record.bundleId, {
+      bundleId: record.bundleId,
+      ops: [record.pending],
+      attempts: [...attempts],
+    });
+  }
+  return [...groups.values()];
+}
+
+function migrateLegacyState(state: LegacyJournalState): JournalState {
+  const bundles = new Map<string, JournalBundle>();
+  const records: JournalRecord[] = state.records.map((record) => {
+    const latest = record.attempts.at(-1);
+    if (!latest) return { pending: record.pending, completed: record.completed };
+
+    let bundle = bundles.get(latest.bundleId);
+    if (!bundle) {
+      bundle = { bundleId: latest.bundleId, opHashes: [], attempts: [] };
+      bundles.set(latest.bundleId, bundle);
+    }
+    bundle.opHashes.push(record.pending.hash);
+    for (const attempt of record.attempts) {
+      if (!bundle.attempts.some((candidate) => candidate.txHash === attempt.txHash)) {
+        bundle.attempts.push(attempt);
+      }
+    }
+    return {
+      pending: record.pending,
+      bundleId: latest.bundleId,
+      completed: record.completed,
+    };
+  });
+  for (const bundle of bundles.values()) {
+    bundle.attempts.sort((a, b) => a.createdAt - b.createdAt);
+  }
+  return {
+    version: 2,
+    context: state.context,
+    records,
+    bundles: [...bundles.values()],
+  };
+}
+
+function sameHashes(a: Hex[], b: Hex[]): boolean {
+  if (a.length !== b.length) return false;
+  const values = new Set(a);
+  return b.every((hash) => values.has(hash));
 }
 
 function sameContext(a: JournalContext, b: JournalContext): boolean {

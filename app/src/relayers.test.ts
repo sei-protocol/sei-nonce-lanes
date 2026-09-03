@@ -16,12 +16,18 @@ import { seiTestnet } from 'viem/chains';
 import { entryPointAbi } from './abi.js';
 import { OperationJournal, type SubmissionAttempt } from './journal.js';
 import type { PendingOp } from './mempool.js';
-import { RelayerPool } from './relayers.js';
+import { RelayerPool, boundedOuterGasLimit } from './relayers.js';
 import { laneNonce } from './userop.js';
 
 const ENTRY_POINT = '0x4337084D9E255Ff0702461CF8895CE9E3b5Ff108';
 const SENDER = '0x1111111111111111111111111111111111111111';
 const MNEMONIC = 'test test test test test test test test test test test junk';
+
+test('caps outer gas headroom below the live block limit', () => {
+  assert.equal(boundedOuterGasLimit(1_000_000n, 12_500_000n), 1_200_000n);
+  assert.equal(boundedOuterGasLimit(10_500_000n, 12_500_000n), 12_499_999n);
+  assert.equal(boundedOuterGasLimit(12_500_000n, 12_500_000n), undefined);
+});
 
 test('restart gets a fresh same-nonce replacement budget after eviction', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'sei-relayer-recovery-'));
@@ -89,6 +95,7 @@ test('restart gets a fresh same-nonce replacement budget after eviction', async 
         maxFeePerGas: 100n,
         maxPriorityFeePerGas: 10n,
       }),
+      getBlock: async () => ({ gasLimit: 12_500_000n }),
       getBlockNumber: async () => 100n,
     } as unknown as PublicClient;
 

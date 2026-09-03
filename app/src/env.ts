@@ -71,6 +71,12 @@ export const venueAddress = readOptionalAddress(process.env, 'VENUE');
 export const operationJournalPath =
   process.env.OPERATION_JOURNAL_PATH?.trim() ||
   resolve(dirname(fileURLToPath(import.meta.url)), '../.state/pending-ops.json');
+export const senderRunLockPath =
+  process.env.SENDER_RUN_LOCK_PATH?.trim() ||
+  resolve(
+    dirname(fileURLToPath(import.meta.url)),
+    `../.state/sender-${configuredChainId}-${trader.address.toLowerCase()}.lock`,
+  );
 
 const orders = readInteger(process.env, 'ORDERS', 24, { min: 1, max: 100_000 });
 const lanePoolSize = readInteger(process.env, 'LANE_POOL_SIZE', 32, { min: 1, max: 4_096 });

@@ -13,6 +13,8 @@
     "fund": "tsx src/fund.ts",
     "dispense": "tsx src/dispense.ts",
     "spray": "tsx src/spray.ts",
+    "swap:setup": "tsx src/swap-setup.ts",
+    "swap:spray": "tsx src/swap-spray.ts",
     "baseline": "tsx src/baseline.ts",
     "diagram": "node scripts/diagram.mjs",
     "test": "tsx --test src/*.test.ts",
