@@ -242,10 +242,10 @@ remains single-threaded.
 └── SECURITY.md                  How to report a vulnerability
 ```
 
-`lib/account-abstraction` and `lib/openzeppelin-contracts` are pinned Git
-submodules, with their revisions recorded in `foundry.lock`. `lib/forge-std` is
-currently vendored as plain files rather than a submodule, so a source archive
-carries it while the other two need `--recurse-submodules`.
+Everything under `lib/` is a pinned Git submodule, with revisions recorded in
+`foundry.lock`. A source archive from GitHub therefore contains no dependencies;
+clone with `--recurse-submodules`, or run `git submodule update --init
+--recursive` in an existing clone.
 
 ## Quick verification
 
