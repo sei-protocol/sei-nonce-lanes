@@ -32,7 +32,7 @@ import {
 } from './env.js';
 import { OperationJournal, type RecoveryBundle } from './journal.js';
 import { LanePool } from './lanes.js';
-import { PrivateMempool, type PendingOp } from './mempool.js';
+import { BundlingQueue, type PendingOp } from './bundling-queue.js';
 import { RelayerPool, type BundleResult } from './relayers.js';
 import { SenderRunLock } from './run-lock.js';
 import {
@@ -289,12 +289,12 @@ async function main() {
   const maxFeePerGas = fees.maxFeePerGas * 2n;
   const maxPriorityFeePerGas = fees.maxPriorityFeePerGas * 2n;
 
-  const mempool = new PrivateMempool();
+  const bundlingQueue = new BundlingQueue();
   const built: PendingOp[] = [...durableRunOps];
-  for (const pending of journal.queuedOps()) mempool.add(pending);
+  for (const pending of journal.queuedOps()) bundlingQueue.add(pending);
 
   const ordersToBuild = Math.min(Math.max(config.orders - built.length, 0), lanePool.idleCount);
-  const unresolvedSwapCount = mempool.size + ordersToBuild;
+  const unresolvedSwapCount = bundlingQueue.size + ordersToBuild;
   const maxPrefundPerSwap =
     (config.verificationGasLimit + callGasLimit + config.preVerificationGas) * maxFeePerGas;
   const maxRunPrefund = BigInt(unresolvedSwapCount) * maxPrefundPerSwap;
@@ -354,7 +354,7 @@ async function main() {
   await journal.add(pendings);
   for (const pending of pendings) {
     built.push(pending);
-    mempool.add(pending);
+    bundlingQueue.add(pending);
   }
   console.log(`signed         ${pendings.length} new swaps in ${signMs}ms`);
 
@@ -372,7 +372,7 @@ async function main() {
   }
 
   console.log('\n=== submit real swaps ===');
-  const queuedSwaps = mempool.size;
+  const queuedSwaps = bundlingQueue.size;
   console.log(
     `${queuedSwaps} queued swap(s) -> bundles of <=${config.maxOpsPerBundle} -> ` +
       `${relayerAccounts.length} relayers`,
@@ -381,7 +381,7 @@ async function main() {
   let settledBundles = 0;
   const submitStart = Date.now();
   const submittedResults = await relayerPool.drain(
-    mempool,
+    bundlingQueue,
     config.maxOpsPerBundle,
     async (result) => {
       if (result.mined) {

@@ -12,8 +12,7 @@ import {
 import type { HDAccount } from 'viem/accounts';
 import { entryPointAbi } from './abi.js';
 import type { OperationJournal, RecoveryBundle, SubmissionAttempt } from './journal.js';
-import type { PendingOp } from './mempool.js';
-import type { PrivateMempool } from './mempool.js';
+import type { BundlingQueue, PendingOp } from './bundling-queue.js';
 import { decodeLaneNonce } from './userop.js';
 
 export type BundleResult = {
@@ -119,11 +118,11 @@ export class RelayerPool {
   }
 
   /**
-   * Drain the mempool. One worker per relayer, each submitting bundles back to back.
+   * Drain the queue. One worker per relayer, each submitting bundles back to back.
    * `onSettled` fires as soon as a bundle resolves so lanes can be released promptly.
    */
   async drain(
-    mempool: PrivateMempool,
+    queue: BundlingQueue,
     maxOpsPerBundle: number,
     onSettled?: (result: BundleResult) => void | Promise<void>,
   ): Promise<BundleResult[]> {
@@ -134,7 +133,7 @@ export class RelayerPool {
       this.relayers.map(async (relayer) => {
         for (;;) {
           if (stopRequested) return;
-          const bundle = mempool.takeBundle(maxOpsPerBundle);
+          const bundle = queue.takeBundle(maxOpsPerBundle);
           if (bundle.length === 0) return;
           let result: BundleResult;
           try {

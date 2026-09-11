@@ -15,7 +15,7 @@ import { mnemonicToAccount } from 'viem/accounts';
 import { seiTestnet } from 'viem/chains';
 import { entryPointAbi } from './abi.js';
 import { OperationJournal, type SubmissionAttempt } from './journal.js';
-import type { PendingOp } from './mempool.js';
+import type { PendingOp } from './bundling-queue.js';
 import { RelayerPool, boundedOuterGasLimit } from './relayers.js';
 import { laneNonce } from './userop.js';
 

@@ -153,10 +153,10 @@ push(text(390, 504, '52ms', { size: 13, anchor: 'middle', fill: GREY }));
 push(text(390, 522, '0 RPC', { size: 13, anchor: 'middle', fill: GREY }));
 
 card(440, 380, 250, 200, {
-  title: 'PRIVATE MEMPOOL',
+  title: 'BUNDLING QUEUE',
   stroke: INK,
   fill: TINT_BLUE,
-  lines: ['in-process queue', '', 'no 4-op sender cap', 'no ERC-7562 rules', '(nobody else to protect)'],
+  lines: ['in-process, not gossiped', '', 'no 4-op sender cap', 'no ERC-7562 rules', '(nobody else to protect)'],
 });
 
 // Fan out to the relayer stack.

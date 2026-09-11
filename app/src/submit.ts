@@ -20,7 +20,7 @@ import {
 } from './env.js';
 import { OperationJournal } from './journal.js';
 import { LanePool } from './lanes.js';
-import { PrivateMempool, type PendingOp } from './mempool.js';
+import { BundlingQueue, type PendingOp } from './bundling-queue.js';
 import { RelayerPool, type BundleResult } from './relayers.js';
 import { SenderRunLock } from './run-lock.js';
 import { buildOp, signUserOp, userOpHash } from './userop.js';
@@ -201,11 +201,11 @@ async function main() {
     }
   }
 
-  const mempool = new PrivateMempool();
+  const bundlingQueue = new BundlingQueue();
   const built: PendingOp[] = [...durableRunOps];
   const queued = journal.queuedOps();
   for (const pending of queued) {
-    mempool.add(pending);
+    bundlingQueue.add(pending);
   }
   if (queued.length > 0) console.log(`requeued       ${queued.length} durable pending op(s)`);
 
@@ -257,7 +257,7 @@ async function main() {
   await journal.add(pendings);
   for (const pending of pendings) {
     built.push(pending);
-    mempool.add(pending);
+    bundlingQueue.add(pending);
   }
   console.log(`signed         ${pendings.length} new ops in ${signMs}ms, without nonce RPCs`);
 
@@ -282,7 +282,7 @@ async function main() {
   console.log(`${built.length} ops -> bundles of <=${config.maxOpsPerBundle} -> ${relayerAccounts.length} relayers\n`);
 
   const submitStart = Date.now();
-  const submittedResults = await relayerPool.drain(mempool, config.maxOpsPerBundle, async (result) => {
+  const submittedResults = await relayerPool.drain(bundlingQueue, config.maxOpsPerBundle, async (result) => {
     if (result.mined) {
       // A successful handleOps consumes every lane, including execution reverts.
       for (const pending of result.ops) lanePool.settle(pending.lane, true);

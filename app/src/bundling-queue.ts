@@ -12,10 +12,12 @@ export type PendingOp = {
 };
 
 /**
- * The private alt-mempool: an in-process queue of signed UserOperations.
+ * An in-process queue of signed UserOperations, packed into `handleOps` bundles.
  *
- * Running our own removes the two limits that make the canonical ERC-4337 mempool
- * unusable for high-frequency submission:
+ * This is not an alt-mempool. Nothing is gossiped, admitted from outside, or held
+ * for a competing bundler; the queue lives and dies with the process that filled
+ * it. Keeping it in-process removes the two limits that make the canonical
+ * ERC-4337 mempool unusable for high-frequency submission:
  *
  * - `SAME_SENDER_MEMPOOL_COUNT` (ERC-7562) caps an unstaked sender at 4 pending
  *   UserOperations. That is a wallet number, not a trading number.
@@ -26,7 +28,7 @@ export type PendingOp = {
  * The EntryPoint still enforces everything that protects funds: signature over the
  * EIP-712 op hash, per-lane nonce uniqueness, and prefund solvency.
  */
-export class PrivateMempool {
+export class BundlingQueue {
   private queue: PendingOp[] = [];
 
   add(pending: PendingOp): void {

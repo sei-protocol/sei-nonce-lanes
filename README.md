@@ -16,7 +16,7 @@ This repository combines:
 
 - **EIP-7702** to keep the existing EOA address, balance, and approvals;
 - **ERC-4337 v0.8** to give that address independent two-dimensional nonce lanes;
-- an in-process private mempool to avoid public-mempool sender limits;
+- an in-process bundling queue to avoid public-mempool sender limits;
 - gas-only relayers that submit `EntryPoint.handleOps` transactions; and
 - a write-ahead journal that recovers evicted or interrupted outer transactions
   at the same relayer nonce.
@@ -139,7 +139,7 @@ UserOperations are not transactions. Gas-only relayers wrap them in
 trader signs UserOperations
           |
           v
-private in-process mempool
+in-process bundling queue
           |
           +--------+--------+--------+
           v        v        v        v
@@ -181,7 +181,7 @@ process performs the complete run and exits.
 3. **UserOp builder** packs the lane nonce and gas pairs, encodes
    `LaneAccount.execute`, computes the EntryPoint EIP-712 digest, and signs it
    with the trader key.
-4. **PrivateMempool** is a FIFO queue of signed operations. It never places two
+4. **BundlingQueue** is a FIFO queue of signed operations. It never places two
    operations from the same lane in one bundle.
 5. **RelayerPool** runs one asynchronous worker per relayer. Each worker
    simulates, signs, journals, broadcasts, and waits for one `handleOps`
@@ -209,6 +209,7 @@ remains single-threaded.
 │   ├── src/
 │   │   ├── abi.ts               Minimal EntryPoint/account/venue ABIs
 │   │   ├── baseline.ts          Live sequential-nonce contrast
+│   │   ├── bundling-queue.ts    In-process queue and lane-safe bundle packing
 │   │   ├── config.ts            Pure environment parsing and validation
 │   │   ├── delegate.ts          Installs the EIP-7702 delegation
 │   │   ├── delegation-code.ts   Pure EIP-7702 designator parser
@@ -218,7 +219,6 @@ remains single-threaded.
 │   │   ├── fund.ts              Funds relayers and the trader's EP deposit
 │   │   ├── journal.ts           Signed-operation write-ahead journal
 │   │   ├── lanes.ts             Local lane allocation and sequence tracking
-│   │   ├── mempool.ts           Private in-process UserOperation queue
 │   │   ├── relayers.ts          Bundle simulation, submission, and recovery
 │   │   ├── run-lock.ts          Cross-workflow lock for one trading account
 │   │   ├── status.ts            Read-only network/account preflight
@@ -293,7 +293,7 @@ test VM. It proves:
 - lane `0` is rejected; and
 - a 50-lane bundle uses one outer EVM transaction.
 
-The Node suite covers configuration, lane allocation, mempool isolation,
+The Node suite covers configuration, lane allocation, bundle lane isolation,
 UserOperation packing, delegation parsing, journal replay/locking, and
 same-nonce relayer replacement after restart.
 
@@ -538,15 +538,15 @@ More precisely, `buildOp` creates a packed v0.8 UserOperation:
 The digest is computed locally, then the first digest is compared with
 `EntryPoint.getUserOpHash` as a runtime compatibility check.
 
-### 5. Private bundling
+### 5. Bundling
 
 Signed operations enter an in-process FIFO. `takeBundle` selects up to
 `MAX_OPS_PER_BUNDLE` operations and refuses to include two operations from the
 same lane.
 
-The private queue avoids the ERC-7562 default
-`SAME_SENDER_MEMPOOL_COUNT = 4` limit for an unstaked sender. It does not bypass
-EntryPoint signature, nonce, execution-gas, or prefund validation.
+Because the queue never leaves the process, it is not subject to the ERC-7562
+default `SAME_SENDER_MEMPOOL_COUNT = 4` limit for an unstaked sender. It does not
+bypass EntryPoint signature, nonce, execution-gas, or prefund validation.
 
 ### 6. Relayer submission
 

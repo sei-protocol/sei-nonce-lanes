@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import type { Address, Hex } from 'viem';
 import { OperationJournal, type SubmissionAttempt } from './journal.js';
-import type { PendingOp } from './mempool.js';
+import type { PendingOp } from './bundling-queue.js';
 
 const ENTRY_POINT = '0x4337084D9E255Ff0702461CF8895CE9E3b5Ff108' as Address;
 const SENDER = '0x1111111111111111111111111111111111111111' as Address;

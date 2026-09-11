@@ -3,7 +3,7 @@ import { mkdir, open as openFile, readFile, rename, unlink, writeFile } from 'no
 import type { FileHandle } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import type { Address, Hex } from 'viem';
-import type { PendingOp } from './mempool.js';
+import type { PendingOp } from './bundling-queue.js';
 
 export type JournalContext = {
   chainId: number;
