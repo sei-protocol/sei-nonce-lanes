@@ -37,8 +37,8 @@ async function main() {
 
   /* ------------------------------- preflight ------------------------------- */
 
-  await assertWriteNetwork('spray');
-  await assertPlainRelayers('spray');
+  await assertWriteNetwork('submit');
+  await assertPlainRelayers('submit');
   activeSenderLock = await SenderRunLock.acquire(senderRunLockPath);
   console.log('=== preflight ===');
   console.log(`chain          ${chain.name} (${chain.id})`);
@@ -218,10 +218,10 @@ async function main() {
       if (!slot) throw new Error(`lane pool exhausted at order ${i}; raise LANE_POOL_SIZE`);
 
       const orderIndex = built.length + i;
-      const sabotaged = orderIndex === config.sabotageIndex;
+      const shouldRevert = orderIndex === config.revertOrderIndex;
       // A limit price under the mark makes the venue revert with Slippage, which is
       // the realistic "this one op fails" case.
-      const limitPx = sabotaged ? markPx - 1n : markPx;
+      const limitPx = shouldRevert ? markPx - 1n : markPx;
       const orderId = runId * 1000n + BigInt(orderIndex);
 
       const unsigned = buildOp({
@@ -248,7 +248,7 @@ async function main() {
         lane: slot.lane,
         seq: slot.seq,
         orderId,
-        label: sabotaged ? 'sabotaged (limit under mark)' : '',
+        label: shouldRevert ? 'expected revert (limit under mark)' : '',
       } satisfies PendingOp;
     }),
   );
@@ -383,15 +383,15 @@ async function main() {
   console.log(`trader EVM nonce     ${nonceBefore} -> ${nonceAfter}  ${nonceBefore === nonceAfter ? 'UNCHANGED' : 'MOVED (unexpected)'}`);
   console.log(`total wall time      ${Date.now() - startedAt}ms`);
 
-  const sabotaged = built.find((pending) => pending.label.includes('sabotaged'));
+  const reverting = built.find((pending) => pending.label.includes('expected revert'));
   if (
-    sabotaged &&
-    landedHashes.has(sabotaged.hash) &&
-    !filled[built.indexOf(sabotaged)] &&
+    reverting &&
+    landedHashes.has(reverting.hash) &&
+    !filled[built.indexOf(reverting)] &&
     succeeded.length > 0
   ) {
     console.log('');
-    console.log(`The sabotaged order reverted and its neighbours still landed. That is the`);
+    console.log(`The reverting order failed and its neighbors still landed. That is the`);
     console.log(`property you wanted: nothing queues behind a failure.`);
   }
 

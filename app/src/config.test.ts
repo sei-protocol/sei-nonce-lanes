@@ -13,6 +13,7 @@ import {
   readMnemonic,
   readOptionalAddress,
   readPrivateKey,
+  readRenamedInteger,
   readRpcUrl,
 } from './config.js';
 
@@ -34,6 +35,21 @@ test('validates integer ranges instead of silently accepting NaN or zero', () =>
   assert.throws(() => readInteger({ COUNT: '0' }, 'COUNT', 4, { min: 1 }), /at least 1/);
   assert.throws(() => readInteger({ COUNT: '1.5' }, 'COUNT', 4), /finite safe integer/);
   assert.throws(() => readInteger({ COUNT: 'NaN' }, 'COUNT', 4), /finite safe integer/);
+});
+
+test('accepts a renamed variable under its deprecated name, preferring the new one', () => {
+  const read = (env: Record<string, string>) =>
+    readRenamedInteger(env, 'NEW', 'OLD', -1, { min: -1, max: 9 });
+
+  assert.deepEqual(read({}), { value: -1, usedDeprecatedName: false });
+  assert.deepEqual(read({ NEW: '3' }), { value: 3, usedDeprecatedName: false });
+  assert.deepEqual(read({ OLD: '5' }), { value: 5, usedDeprecatedName: true });
+  // The new name wins so a stale alias cannot silently override a deliberate value.
+  assert.deepEqual(read({ NEW: '3', OLD: '5' }), { value: 3, usedDeprecatedName: false });
+  // A blank alias is not a value.
+  assert.deepEqual(read({ OLD: '  ' }), { value: -1, usedDeprecatedName: false });
+  // Range validation still applies, and reports the name the operator actually set.
+  assert.throws(() => read({ OLD: '99' }), /OLD must be at most 9/);
 });
 
 test('validates flags, keys, mnemonics, addresses, amounts, and RPC URLs', () => {
@@ -105,16 +121,16 @@ test('recognizes loopback RPCs and blocks public development credentials remotel
 
 test('requires an explicit opt-in for remote Pacific-1 writes', () => {
   assert.doesNotThrow(() =>
-    assertMainnetWriteAllowed(1328, 'https://evm-rpc-testnet.sei-apis.com', false, 'spray'),
+    assertMainnetWriteAllowed(1328, 'https://evm-rpc-testnet.sei-apis.com', false, 'submit'),
   );
   assert.doesNotThrow(() =>
-    assertMainnetWriteAllowed(1329, 'http://127.0.0.1:8545', false, 'spray'),
+    assertMainnetWriteAllowed(1329, 'http://127.0.0.1:8545', false, 'submit'),
   );
   assert.doesNotThrow(() =>
-    assertMainnetWriteAllowed(1329, 'https://evm-rpc.sei-apis.com', true, 'spray'),
+    assertMainnetWriteAllowed(1329, 'https://evm-rpc.sei-apis.com', true, 'submit'),
   );
   assert.throws(
-    () => assertMainnetWriteAllowed(1329, 'https://evm-rpc.sei-apis.com', false, 'spray'),
-    /spray is blocked on remote Pacific-1/,
+    () => assertMainnetWriteAllowed(1329, 'https://evm-rpc.sei-apis.com', false, 'submit'),
+    /submit is blocked on remote Pacific-1/,
   );
 });

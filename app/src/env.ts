@@ -15,6 +15,7 @@ import {
   readMnemonic,
   readOptionalAddress,
   readPrivateKey,
+  readRenamedInteger,
   readRpcUrl,
 } from './config.js';
 
@@ -84,6 +85,17 @@ if (orders > lanePoolSize) {
   throw new Error(`ORDERS (${orders}) cannot exceed LANE_POOL_SIZE (${lanePoolSize})`);
 }
 
+const revertOrderIndex = readRenamedInteger(
+  process.env,
+  'REVERT_ORDER_INDEX',
+  'SABOTAGE_INDEX',
+  orders > 2 ? 2 : -1,
+  { min: -1, max: orders - 1 },
+);
+if (revertOrderIndex.usedDeprecatedName) {
+  console.warn('SABOTAGE_INDEX is deprecated; rename it to REVERT_ORDER_INDEX.');
+}
+
 export const config = {
   /** How many orders to fire in one run. */
   orders,
@@ -103,10 +115,7 @@ export const config = {
     max: lanePoolSize,
   }),
   /** Index of the order deliberately given an unfillable limit price, or -1 to disable. */
-  sabotageIndex: readInteger(process.env, 'SABOTAGE_INDEX', orders > 2 ? 2 : -1, {
-    min: -1,
-    max: orders - 1,
-  }),
+  revertOrderIndex: revertOrderIndex.value,
 
   verificationGasLimit: BigInt(
     readInteger(process.env, 'VERIFICATION_GAS_LIMIT', 150_000, { min: 1 }),

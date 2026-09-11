@@ -114,7 +114,7 @@ export class OperationJournal {
   }
 
   /**
-   * Prevent two spray processes from assigning the same lanes or overwriting
+   * Prevent two submission processes from assigning the same lanes or overwriting
    * each other's journal snapshots. A dead process's PID makes its lock stale.
    */
   async acquireLock(): Promise<void> {
@@ -145,7 +145,7 @@ export class OperationJournal {
 
       const owner = await readLock(path);
       if (owner && isProcessAlive(owner.pid)) {
-        throw new Error(`another spray process (pid ${owner.pid}) owns ${path}`);
+        throw new Error(`another submission process (pid ${owner.pid}) owns ${path}`);
       }
 
       // A crash leaves the lock file behind. Remove it only after confirming

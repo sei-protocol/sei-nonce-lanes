@@ -7,7 +7,7 @@ export type PendingOp = {
   lane: bigint;
   seq: bigint;
   orderId: bigint;
-  /** Human label for the run report, e.g. "order 7 (sabotaged)". */
+  /** Human label for the run report, e.g. "order 7 (expected revert)". */
   label: string;
 };
 

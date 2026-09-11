@@ -129,8 +129,8 @@ p1.forEach((b, i) => {
 
 push(text(890, 200, 'one gap freezes everything behind it', { size: 19, weight: 'bold', fill: RED }));
 push(text(890, 228, "Sei's Autobahn mempool rejects a nonce gap outright with `bad nonce`,", { size: 14.5, fill: GREY }));
-push(text(890, 250, 'and pending-nonce queries just return the confirmed value, so there is', { size: 14.5, fill: GREY }));
-push(text(890, 272, 'no queue to inspect. Hence the usual fleet of funded hot wallets.', { size: 14.5, fill: GREY }));
+push(text(890, 250, 'and Sei documents the pending nonce as unreliable, so there is no', { size: 14.5, fill: GREY }));
+push(text(890, 272, 'queue you can trust. Hence the usual fleet of funded hot wallets.', { size: 14.5, fill: GREY }));
 
 /* --------------------------------------------------------------- panel two */
 

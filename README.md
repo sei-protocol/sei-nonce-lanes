@@ -1,7 +1,16 @@
-# Parallel-nonce transaction submission on Sei
+# Nonce lanes: concurrent submission from one Sei account
 
-Submit many independent actions from one funded address without putting the
-trading account behind one sequential EVM nonce queue.
+Submit many independent actions from one funded address without putting that
+account behind a single sequential EVM nonce queue.
+
+The mechanism is ERC-4337's two-dimensional nonce, which this repository calls a
+**lane**. Operations on different lanes have no ordering relationship, so one
+stuck operation strands nothing behind it.
+
+> [!NOTE]
+> This is submission concurrency, not parallel execution. Lanes remove *ordering*
+> between submissions; they do not make conflicting storage writes run in
+> parallel. See [Submission concurrency is not execution parallelism](#submission-concurrency-is-not-execution-parallelism).
 
 This repository combines:
 
@@ -41,6 +50,7 @@ The expected EntryPoint is the canonical v0.8 singleton at
 - [Security and production limitations](#security-and-production-limitations)
 - [Troubleshooting](#troubleshooting)
 - [References and versions](#references-and-versions)
+- [License](#license)
 
 ## The problem
 
@@ -58,12 +68,16 @@ The second case is the submission bottleneck. It includes transactions that are
 dropped, underpriced, rejected at admission, lost before broadcast, or stranded
 after a process failure.
 
-Sei does not expose an Ethereum-style pending state.
-`eth_getTransactionCount(address, "pending")` returns the same confirmed nonce
-as `"latest"`, so an application cannot use that call to reconstruct a pending
-nonce queue. Strict producer paths have also rejected nonce gaps rather than
-holding them for later; `npm run baseline` probes the behavior of the configured
-RPC path instead of assuming every endpoint behaves identically.
+Sei does not expose an Ethereum-style pending state, and its documentation says
+not to depend on one: a pending nonce that differs from the confirmed nonce is
+listed as unreliable, and `txpool_content` drops the geth-style pending/queued
+distinction and truncates its result. What `eth_getTransactionCount(address,
+"pending")` returns depends on the node and on whether it runs Giga; it may be a
+next-pending nonce from the mempool or just the confirmed nonce. Either way it is
+not a foundation to rebuild a pending queue on. Strict producer paths also reject
+nonce gaps rather than holding them for later; `npm run baseline` probes the
+behavior of the configured RPC path instead of assuming every endpoint behaves
+identically.
 
 The usual workaround is several funded hot wallets. That raises throughput, but
 fragments balances and approvals and expands the set of keys that can move
@@ -109,7 +123,7 @@ and approvals remain attached to the same address. Calls made through
 `msg.sender`.
 
 The trader spends an ordinary EVM nonce when installing or replacing the
-delegation. The `spray` trading path then signs UserOperations and does not send
+delegation. The `submit` trading path then signs UserOperations and does not send
 ordinary transactions from the trader. Administrative scripts such as `fund`
 still use the trader's sequential EVM nonce.
 
@@ -146,7 +160,7 @@ trader's signature.
 
 ## Architecture
 
-The application is a one-shot Node.js CLI, not a daemon. One `npm run spray`
+The application is a one-shot Node.js CLI, not a daemon. One `npm run submit`
 process performs the complete run and exits.
 
 ### On-chain components
@@ -173,7 +187,7 @@ process performs the complete run and exits.
    simulates, signs, journals, broadcasts, and waits for one `handleOps`
    transaction before advancing.
 6. **OperationJournal** stores signed UserOperations and every signed outer
-   transaction before broadcast. A lock prevents two `spray` processes from
+   transaction before broadcast. A lock prevents two `submit` processes from
    assigning the same lanes.
 
 There are no worker threads. Signing is scheduled concurrently in the Node
@@ -206,21 +220,32 @@ remains single-threaded.
 │   │   ├── lanes.ts             Local lane allocation and sequence tracking
 │   │   ├── mempool.ts           Private in-process UserOperation queue
 │   │   ├── relayers.ts          Bundle simulation, submission, and recovery
-│   │   ├── spray.ts             End-to-end orchestrator and report
+│   │   ├── run-lock.ts          Cross-workflow lock for one trading account
 │   │   ├── status.ts            Read-only network/account preflight
+│   │   ├── submit.ts            End-to-end orchestrator and report
 │   │   ├── swap-config.ts       Atlantic-2 DragonSwap and swap settings
 │   │   ├── swap-setup.ts        Native-USDC approval and liquidity setup
-│   │   ├── swap-spray.ts        Parallel real-swap orchestrator and report
-│   │   └── userop.ts            UserOperation packing, hashing, and signing
+│   │   ├── swap-submit.ts       Real-swap orchestrator and report
+│   │   ├── userop.ts            UserOperation packing, hashing, and signing
+│   │   └── *.test.ts            Unit tests, colocated with what they cover
 │   ├── scripts/diagram.mjs      Generates the architecture SVG
+│   ├── tsconfig.json            Strict TypeScript configuration
 │   └── package.json             CLI and verification scripts
+├── .github/workflows/ci.yml     Contract, app, and diagram checks
 ├── assets/how-it-works.svg      Generated visual explainer
 ├── .env.example                 Documented runtime configuration
-└── foundry.toml                 Solidity build, remappings, and formatting
+├── .nvmrc                       Node version used by CI and `nvm use`
+├── foundry.lock                 Pinned submodule revisions
+├── foundry.toml                 Solidity build, remappings, and formatting
+├── LICENSE                      MIT
+├── NOTICE                       Third-party licenses, including one GPL-3.0 dependency
+└── SECURITY.md                  How to report a vulnerability
 ```
 
 `lib/account-abstraction` and `lib/openzeppelin-contracts` are pinned Git
-submodules. `lib/forge-std` is vendored in the repository.
+submodules, with their revisions recorded in `foundry.lock`. `lib/forge-std` is
+currently vendored as plain files rather than a submodule, so a source archive
+carries it while the other two need `--recurse-submodules`.
 
 ## Quick verification
 
@@ -228,13 +253,13 @@ submodules. `lib/forge-std` is vendored in the repository.
 
 - Git with submodule support
 - [Foundry](https://getfoundry.sh/) with `forge`, `anvil`, and `cast`
-- Node.js 26 and npm
+- Node.js 22 or newer, and npm (`.nvmrc` pins 24, the Active LTS)
 
 Clone dependencies with the repository:
 
 ```bash
-git clone --recurse-submodules https://github.com/sei-protocol/sei-parallel-nonce-hft.git
-cd sei-parallel-nonce-hft
+git clone --recurse-submodules https://github.com/sei-protocol/sei-nonce-lanes.git
+cd sei-nonce-lanes
 ```
 
 For an existing clone:
@@ -343,12 +368,12 @@ npm run status
 npm run delegate
 npm run fund
 npm run status
-npm run spray
+npm run submit
 ```
 
 `status` is read-only. `delegate` spends the trader's EVM nonce once. `fund`
 uses ordinary trader transactions to top up relayers and pre-deposit gas in the
-EntryPoint. `spray` then verifies that the trader's EVM nonce does not move.
+EntryPoint. `submit` then verifies that the trader's EVM nonce does not move.
 
 By default, one order receives an unfillable limit price. Its UserOperation
 reverts during execution while the neighboring lanes continue.
@@ -384,7 +409,7 @@ npm ci
 npm run status
 npm run delegate
 npm run fund
-npm run spray
+npm run submit
 ```
 
 > [!CAUTION]
@@ -408,7 +433,7 @@ for the configured trader, then run:
 ```bash
 cd app
 npm run swap:setup
-npm run swap:spray
+npm run swap:submit
 ```
 
 `swap:setup` uses ordinary trader transactions to approve a limited amount of
@@ -417,27 +442,27 @@ approval covers the larger of the configured run requirement and
 `SWAP_RETAINED_USDC_ALLOWANCE`. The defaults seed 100 SEI and 100 USDC. This is
 public testnet liquidity, not a private fixture.
 
-`swap:spray` alternates tiny native SEI -> native USDC and native USDC -> native
+`swap:submit` alternates tiny native SEI -> native USDC and native USDC -> native
 SEI swaps through independent ERC-4337 lanes. It reports execution outcomes
 from EntryPoint events instead of issuing one RPC read per swap. `ORDERS`,
-`LANE_POOL_SIZE`, `MAX_OPS_PER_BUNDLE`, and `SABOTAGE_INDEX` control the run:
+`LANE_POOL_SIZE`, `MAX_OPS_PER_BUNDLE`, and `REVERT_ORDER_INDEX` control the run:
 
 ```bash
 ORDERS=3000 \
 LANE_POOL_SIZE=3000 \
 MAX_OPS_PER_BUNDLE=4 \
-SABOTAGE_INDEX=2 \
-npm run swap:spray
+REVERT_ORDER_INDEX=2 \
+npm run swap:submit
 ```
 
 The configured trader must hold enough of both assets for every input-side swap
 to execute regardless of landing order. One deliberately impossible minimum
 output demonstrates that a slippage revert does not strand neighboring lanes.
-Set `SABOTAGE_INDEX=-1` when measuring maximum throughput.
+Set `REVERT_ORDER_INDEX=-1` when measuring maximum throughput.
 
 ## Runtime walkthrough
 
-`app/src/spray.ts` is the orchestrator.
+`app/src/submit.ts` is the orchestrator.
 
 ### 1. Preflight
 
@@ -546,7 +571,7 @@ venue, prints a per-order report, and compares the trader's EVM nonce before and
 after the run.
 
 When every bundle is resolved, completed journal entries are cleared. Otherwise
-the command exits non-zero and leaves enough information for the next `spray`
+the command exits non-zero and leaves enough information for the next `submit`
 invocation to recover.
 
 ## Failure and recovery semantics
@@ -604,14 +629,18 @@ Run npm commands from `app/`.
 | `npm run delegate` | Yes | Install or replace the trader's EIP-7702 delegation |
 | `npm run fund` | Yes | Use trader transactions to top up relayers and `EntryPoint.depositTo(trader)` |
 | `npm run dispense` | Yes | Wait for relayer 0 to receive SEI, then split it across relayers |
-| `npm run spray` | Yes | Build, journal, bundle, submit, recover, and report UserOperations |
+| `npm run submit` | Yes | Build, journal, bundle, submit, recover, and report UserOperations |
 | `npm run swap:setup` | Yes | Approve native USDC and seed the Atlantic-2 DragonSwap V1 pair |
-| `npm run swap:spray` | Yes | Submit alternating real SEI/native-USDC swaps through nonce lanes |
+| `npm run swap:submit` | Yes | Submit alternating real SEI/native-USDC swaps through nonce lanes |
 | `npm run baseline` | Yes | Probe sequential EVM nonce-gap behavior with a gas-only relayer |
 | `npm run diagram` | No chain write | Regenerate `assets/how-it-works.svg` |
 | `npm test` | No | Run Node unit tests |
 | `npm run typecheck` | No | Run strict TypeScript checks |
 | `npm run check` | No | Run the TypeScript checker and Node tests |
+
+`submit` and `swap:submit` were previously called `spray` and `swap:spray`. Both
+old script names still work as aliases, and `SABOTAGE_INDEX` is still accepted
+in place of `REVERT_ORDER_INDEX` with a deprecation warning.
 
 `dispense` polls until relayer `0` has a non-zero balance. Use `Ctrl-C` to stop
 waiting. `fund` and `dispense` solve different bootstrapping cases; do not run
@@ -649,8 +678,8 @@ Credential-bearing RPC paths and query strings are redacted in status output.
 | `RELAYER_START_INDEX` | `0` | First non-negative mnemonic address index |
 | `RELAYER_FUNDING` | `0.5` | Non-negative target SEI balance per relayer for `fund` |
 | `ENTRYPOINT_DEPOSIT` | `1` | Non-negative target trader deposit in EntryPoint for `fund` |
-| `LANE_ACCOUNT_IMPL` | unset | Deployed `LaneAccount`; required by `delegate` and `spray` |
-| `VENUE` | unset | Deployed venue target; required by `spray` |
+| `LANE_ACCOUNT_IMPL` | unset | Deployed `LaneAccount`; required by `delegate` and `submit` |
+| `VENUE` | unset | Deployed venue target; required by `submit` |
 
 The trader and every relayer must be distinct, and relayer derivations must not
 produce duplicate addresses. Before a relayer funding or submission command,
@@ -664,7 +693,7 @@ contract code or EIP-7702 delegation.
 | `ORDERS` | `24` | Positive number of demo orders in one durable run |
 | `LANE_POOL_SIZE` | `32` | `1..4096` lanes and maximum in-flight UserOperations |
 | `MAX_OPS_PER_BUNDLE` | `4` | `1..LANE_POOL_SIZE` operations sharing one validation domain |
-| `SABOTAGE_INDEX` | `2` | `-1` to disable, otherwise `0..ORDERS-1` |
+| `REVERT_ORDER_INDEX` | `2` | `-1` to disable, otherwise `0..ORDERS-1` |
 | `VERIFICATION_GAS_LIMIT` | `150000` | Positive per-operation verification gas |
 | `CALL_GAS_LIMIT` | `500000` | Positive execution-gas floor; live estimate may raise it |
 | `PRE_VERIFICATION_GAS` | `60000` | Positive per-operation pre-verification gas |
@@ -738,7 +767,7 @@ RELAYER_COUNT * MAX_OPS_PER_BUNDLE
 That is a planning heuristic, not a throughput guarantee. RPC latency, block
 limits, state contention, gas, and producer policy still apply.
 
-### Submission parallelism is not execution parallelism
+### Submission concurrency is not execution parallelism
 
 Independent nonce lanes remove ordering between submissions. They do not make
 conflicting storage writes execute in parallel.
@@ -776,7 +805,7 @@ EIP-7702 changes the code executed at the trader's address. Before delegation:
 - inspect any existing delegation; and
 - use a throwaway account for this demo.
 
-`spray` refuses to run if the current designator does not exactly match
+`submit` refuses to run if the current designator does not exactly match
 `LANE_ACCOUNT_IMPL`.
 
 ### Relayer compromise
@@ -858,8 +887,8 @@ Run `npm run status` and resolve the cause before widening bundles or retrying.
 
 ### Journal lock is owned by another process
 
-Only one lane-based process may use a trader at a time, even when `spray` and
-`swap:spray` use different journals. Stop the other process. A lock whose
+Only one lane-based process may use a trader at a time, even when `submit` and
+`swap:submit` use different journals. Stop the other process. A lock whose
 recorded PID is no longer alive is removed automatically on the next run.
 
 ### `AA95 out of gas` while widening bundles
@@ -871,7 +900,7 @@ that fails simulation is broadcast or consumed. Rerun with a smaller
 ### A bundle remains in pending recovery
 
 Do not delete the journal and do not send the relayer's next nonce manually.
-Run `npm run spray` again after the RPC can answer receipt and nonce queries. The
+Run `npm run submit` again after the RPC can answer receipt and nonce queries. The
 process will rebroadcast or replace at the same nonce before creating new work.
 
 If the app reports partial lane consumption or another state it cannot reconcile,
@@ -896,8 +925,20 @@ Tested toolchain:
 - `account-abstraction` v0.8.0
 - OpenZeppelin Contracts v5.1.0
 - viem 2.56
-- Node.js 26.5.1
+- forge-std 1.16.2
+- Node.js 22 and 24 (both exercised in CI)
 
 Dependencies are pinned by Git submodule commit and `package-lock.json`. Chain
 deployments and RPC behavior can change; rerun the preflight and tests rather
 than treating this document as a live network registry.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
+
+The dependencies under `lib/` carry their own terms, including one GPL-3.0
+dependency that this project uses only in tests. [NOTICE](NOTICE) explains which
+files come from where and why the deployment path stays MIT.
+
+To report a vulnerability, follow [SECURITY.md](SECURITY.md) rather than opening
+a public issue.

@@ -78,7 +78,7 @@ test('prevents concurrent journal owners and releases the lock', async () => {
     const second = await OperationJournal.open(path, context);
 
     await first.acquireLock();
-    await assert.rejects(second.acquireLock(), /another spray process/);
+    await assert.rejects(second.acquireLock(), /another submission process/);
     await first.releaseLock();
 
     await second.acquireLock();

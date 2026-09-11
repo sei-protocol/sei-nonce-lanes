@@ -9,3 +9,9 @@ app/node_modules/
 .state/
 *.log
 .DS_Store
+
+# Editors and coverage output
+.idea/
+.vscode/
+coverage/
+lcov.info

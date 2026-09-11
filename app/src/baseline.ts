@@ -15,8 +15,10 @@ import {
  * A single account's EVM nonces are strictly sequential. Submitting nonce n+1 while
  * n is missing is not queued for later, it is rejected outright. Sei's Autobahn
  * producer mempool admits EVM transactions in per-sender nonce order and returns a
- * `bad nonce` error on a gap, and `eth_getTransactionCount(addr, "pending")` returns
- * the same value as `"latest"`, so there is no pending-nonce view to reason about.
+ * `bad nonce` error on a gap. Nor is there a pending view to fall back on: Sei
+ * documents a pending nonce differing from the confirmed nonce as unreliable, so
+ * whatever `eth_getTransactionCount(addr, "pending")` returns on a given node is
+ * not something to rebuild a queue on.
  */
 async function main() {
   await assertWriteNetwork('baseline');
@@ -63,7 +65,7 @@ async function main() {
 
   const end = await publicClient.getTransactionCount({ address: account.address });
   console.log(`\nnonce ${start} -> ${end}`);
-  console.log('\nOne account, one queue. Compare with `npm run spray`, where 24 operations');
+  console.log('\nOne account, one queue. Compare with `npm run submit`, where 24 operations');
   console.log('from a single account are mutually independent and one failure strands nothing.');
 }
 

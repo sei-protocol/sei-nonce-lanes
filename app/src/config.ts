@@ -38,6 +38,27 @@ export function readInteger(
   return value;
 }
 
+/**
+ * Reads an integer that used to be spelled differently, so an existing `.env` or
+ * a published tutorial keeps working after a rename. `name` wins when both are
+ * set. Pure: the caller decides how to surface `usedDeprecatedName`.
+ */
+export function readRenamedInteger(
+  env: EnvSource,
+  name: string,
+  deprecatedName: string,
+  fallback: number,
+  options: IntegerOptions = {},
+): { value: number; usedDeprecatedName: boolean } {
+  if (!env[name]?.trim() && env[deprecatedName]?.trim()) {
+    return {
+      value: readInteger(env, deprecatedName, fallback, options),
+      usedDeprecatedName: true,
+    };
+  }
+  return { value: readInteger(env, name, fallback, options), usedDeprecatedName: false };
+}
+
 export function readChainId(env: EnvSource): 1328 | 1329 {
   const chainId = readInteger(env, 'SEI_CHAIN_ID', 1328);
   if (chainId !== 1328 && chainId !== 1329) {

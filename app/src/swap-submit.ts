@@ -62,9 +62,9 @@ async function main() {
   const implementation = laneAccountImpl;
   if (!implementation) throw new Error('Set LANE_ACCOUNT_IMPL in .env');
 
-  await assertWriteNetwork('swap:spray');
-  await assertPlainRelayers('swap:spray');
-  if (chain.id !== 1328) throw new Error('Real-swap spray is restricted to Atlantic-2');
+  await assertWriteNetwork('swap:submit');
+  await assertPlainRelayers('swap:submit');
+  if (chain.id !== 1328) throw new Error('Real-swap submission is restricted to Atlantic-2');
   activeSenderLock = await SenderRunLock.acquire(senderRunLockPath);
 
   console.log('=== real-swap preflight ===');
@@ -317,13 +317,13 @@ async function main() {
 
       const swapIndex = built.length + i;
       const direction: SwapDirection = swapIndex % 2 === 0 ? 'SEI->USDC' : 'USDC->SEI';
-      const sabotaged = swapIndex === config.sabotageIndex;
+      const shouldRevert = swapIndex === config.revertOrderIndex;
       const call = buildSwapCall(
         direction,
         deadline,
         seiToUsdcMin,
         usdcToSeiMin,
-        sabotaged,
+        shouldRevert,
       );
       const unsigned = buildOp({
         sender: trader.address,
@@ -430,7 +430,7 @@ async function main() {
     (pending) => landedHashes.has(pending.hash) && !byHash.has(pending.hash),
   );
   const unexpectedOutcomes = built.filter((pending) => {
-    const expected = pending.label.includes('sabotaged') ? false : true;
+    const expected = pending.label.includes('expected revert') ? false : true;
     return byHash.get(pending.hash) !== expected;
   });
   const pendingBundles = results.filter((result) => result.pending);
@@ -503,7 +503,7 @@ async function main() {
   if (pendingBundles.length > 0 || failedBundles.length > 0) {
     throw new Error(`${pendingBundles.length + failedBundles.length} bundle(s) require recovery`);
   }
-  if (nonceBefore !== nonceAfter) throw new Error('Trader EVM nonce moved during swap spray');
+  if (nonceBefore !== nonceAfter) throw new Error('Trader EVM nonce moved during swap submission');
   if (unexpectedOutcomes.length > 0) {
     throw new Error(
       `${unexpectedOutcomes.length} swap outcome(s) were missing or unexpected; retaining the journal`,
@@ -517,14 +517,14 @@ function buildSwapCall(
   deadline: bigint,
   seiToUsdcMin: bigint,
   usdcToSeiMin: bigint,
-  sabotaged: boolean,
+  shouldRevert: boolean,
 ): SwapCall {
-  const amountOutMin = sabotaged
+  const amountOutMin = shouldRevert
     ? maxUint256
     : direction === 'SEI->USDC'
       ? seiToUsdcMin
       : usdcToSeiMin;
-  const suffix = sabotaged ? ' sabotaged (impossible min-out)' : '';
+  const suffix = shouldRevert ? ' expected revert (impossible min-out)' : '';
 
   if (direction === 'SEI->USDC') {
     return {

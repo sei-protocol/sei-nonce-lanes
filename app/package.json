@@ -1,20 +1,42 @@
 {
-  "name": "sei-parallel-nonce-app",
+  "name": "sei-nonce-lanes",
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "Private ERC-4337 mempool and relayer pool for parallel-nonce submission on Sei",
+  "description": "Concurrent transaction submission from one funded Sei EOA, using ERC-4337 nonce lanes and EIP-7702 delegation",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sei-protocol/sei-nonce-lanes.git",
+    "directory": "app"
+  },
+  "bugs": {
+    "url": "https://github.com/sei-protocol/sei-nonce-lanes/issues"
+  },
+  "homepage": "https://github.com/sei-protocol/sei-nonce-lanes#readme",
+  "keywords": [
+    "sei",
+    "erc-4337",
+    "eip-7702",
+    "nonce",
+    "account-abstraction",
+    "entrypoint",
+    "relayer",
+    "bundler"
+  ],
   "engines": {
-    "node": ">=26 <27"
+    "node": ">=22"
   },
   "scripts": {
     "status": "tsx src/status.ts",
     "delegate": "tsx src/delegate.ts",
     "fund": "tsx src/fund.ts",
     "dispense": "tsx src/dispense.ts",
-    "spray": "tsx src/spray.ts",
+    "submit": "tsx src/submit.ts",
+    "spray": "npm run submit",
     "swap:setup": "tsx src/swap-setup.ts",
-    "swap:spray": "tsx src/swap-spray.ts",
+    "swap:submit": "tsx src/swap-submit.ts",
+    "swap:spray": "npm run swap:submit",
     "baseline": "tsx src/baseline.ts",
     "diagram": "node scripts/diagram.mjs",
     "test": "tsx --test src/*.test.ts",
@@ -27,7 +49,7 @@
     "viem": "^2.56.3"
   },
   "devDependencies": {
-    "@types/node": "^26.4.1",
+    "@types/node": "^22.0.0",
     "roughjs": "^4.6.6",
     "tsx": "^4.23.13",
     "typescript": "^7.0.2"
