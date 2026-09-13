@@ -122,8 +122,9 @@ and approvals remain attached to the same address. Calls made through
 `LaneAccount.execute` therefore reach the venue with the trading EOA as
 `msg.sender`.
 
-The trader spends an ordinary EVM nonce when installing or replacing the
-delegation. The `submit` trading path then signs UserOperations and does not send
+The trader spends two ordinary EVM nonces when installing or replacing the
+delegation, one for the type-4 transaction and one for the authorization it
+carries. The `submit` trading path then signs UserOperations and does not send
 ordinary transactions from the trader. Administrative scripts such as `fund`
 still use the trader's sequential EVM nonce.
 
@@ -216,6 +217,7 @@ remains single-threaded.
 │   │   ├── delegation.ts        Reads and validates delegation designators
 │   │   ├── dispense.ts          Splits externally supplied gas funds
 │   │   ├── env.ts               Runtime config, accounts, chain, and clients
+│   │   ├── file-lock.ts         Inode-identified cross-process file lock
 │   │   ├── fund.ts              Funds relayers and the trader's EP deposit
 │   │   ├── journal.ts           Signed-operation write-ahead journal
 │   │   ├── lanes.ts             Local lane allocation and sequence tracking
@@ -371,9 +373,11 @@ npm run status
 npm run submit
 ```
 
-`status` is read-only. `delegate` spends the trader's EVM nonce once. `fund`
-uses ordinary trader transactions to top up relayers and pre-deposit gas in the
-EntryPoint. `submit` then verifies that the trader's EVM nonce does not move.
+`status` is read-only. `delegate` is self-sponsored, so it advances the trader's
+EVM nonce twice: once for the type-4 transaction and once for the authorization
+it carries, which is signed over `nonce + 1`. `fund` uses ordinary trader
+transactions to top up relayers and pre-deposit gas in the EntryPoint. `submit`
+then verifies that the trader's EVM nonce does not move.
 
 By default, one order receives an unfillable limit price. Its UserOperation
 reverts during execution while the neighboring lanes continue.
@@ -487,8 +491,11 @@ The process estimates:
 - the delegated account's complete venue call; and
 - each outer `handleOps` transaction before signing it.
 
-`CALL_GAS_LIMIT` is a floor. If the live delegated-call estimate plus headroom is
-higher, the application raises the per-operation call gas limit.
+The measured delegated-call estimate plus 25% sets the per-operation call gas
+limit. `CALL_GAS_LIMIT` overrides it only as a floor, and is unset by default:
+the EntryPoint reserves each operation's declared call gas before running it, so
+a declared value above the measurement reserves block gas limit, and therefore
+operations per block, without changing the gas actually used.
 
 `LanePool.create` reads `EntryPoint.getNonce(trader, lane)` for lanes
 `1..LANE_POOL_SIZE`, with bounded RPC concurrency. Those values become local
@@ -613,9 +620,11 @@ On restart, the last exact raw transaction is rebroadcast first. A fresh
 same-nonce replacement budget is then available. The worker never sends nonce
 `n + 1` while a transaction at `n` might still land.
 
-The journal uses restricted file permissions and temp-file replacement to
-survive normal process crashes. It is not a replicated database and does not
-claim durability through disk, kernel, or host failure. Journal version 2 stores
+The journal uses restricted file permissions and temp-file replacement. Each
+snapshot is fsynced before the rename and the containing directory is fsynced
+after it, so a record that has been written survives a lost kernel or host and
+not only a crashed process. It is still not a replicated database: a failed disk
+takes it with them. Journal version 2 stores
 each signed outer transaction once per bundle rather than duplicating it in
 every operation record; version 1 files migrate automatically.
 
@@ -695,7 +704,7 @@ contract code or EIP-7702 delegation.
 | `MAX_OPS_PER_BUNDLE` | `4` | `1..LANE_POOL_SIZE` operations sharing one validation domain |
 | `REVERT_ORDER_INDEX` | `2` | `-1` to disable, otherwise `0..ORDERS-1` |
 | `VERIFICATION_GAS_LIMIT` | `150000` | Positive per-operation verification gas |
-| `CALL_GAS_LIMIT` | `500000` | Positive execution-gas floor; live estimate may raise it |
+| `CALL_GAS_LIMIT` | unset | Optional positive execution-gas floor; the live estimate is used when unset |
 | `PRE_VERIFICATION_GAS` | `60000` | Positive per-operation pre-verification gas |
 
 `ORDERS` must not exceed `LANE_POOL_SIZE`; the application rejects that
@@ -706,6 +715,7 @@ configuration instead of silently submitting fewer orders than requested.
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `BUNDLE_RECEIPT_TIMEOUT_MS` | `12000` | Positive receipt wait before replacement handling |
+| `RECEIPT_POLLING_INTERVAL_MS` | `250` | Receipt poll interval, `10..60000`; viem's own default is 4000 |
 | `BUNDLE_MAX_ATTEMPTS` | `3` | Positive same-nonce attempt count per process invocation |
 | `REPLACEMENT_FEE_BUMP_PERCENT` | `25` | Fee increase per replacement; accepted range `10..1000` |
 | `OPERATION_JOURNAL_PATH` | `app/.state/pending-ops.json` | Durable signed-operation journal |
@@ -890,6 +900,12 @@ Run `npm run status` and resolve the cause before widening bundles or retrying.
 Only one lane-based process may use a trader at a time, even when `submit` and
 `swap:submit` use different journals. Stop the other process. A lock whose
 recorded PID is no longer alive is removed automatically on the next run.
+
+`could not acquire the lock ... within 2000ms` is different: it means the lock
+file is there but its contents could not be read, which is what a live holder
+looks like for the moment between creating the file and writing to it. Removing
+such a lock would evict a running process, so the next run waits for it instead.
+If it persists, no process owns it and the file can be deleted by hand.
 
 ### `AA95 out of gas` while widening bundles
 

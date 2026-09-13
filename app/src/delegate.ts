@@ -32,18 +32,27 @@ async function main() {
 
   const wallet = createWalletClient({ account: trader, chain, transport: http(rpcUrl) });
 
-  // `executor: 'self'` tells viem the authorizing EOA is also sending the type-4
-  // transaction, so the authorization is signed over nonce+1: the outer transaction
-  // consumes the current nonce before the authorization list is processed.
+  // Pin both nonces to one confirmed read. Left unset, viem fills each from
+  // `eth_getTransactionCount(addr, "pending")`, the tag this repo treats as
+  // unreliable on Sei. A wrong authorization nonce is not rejected: the tuple is
+  // skipped, the transaction still succeeds, and nothing is installed.
+  //
+  // The trader sends the type-4 transaction itself, so the outer transaction
+  // consumes `nonce` before the authorization list is processed and the
+  // authorization has to be signed over `nonce + 1`.
+  const nonce = await publicClient.getTransactionCount({ address: trader.address });
+  console.log(`nonce      ${nonce} (authorization signed over ${nonce + 1})`);
+
   const authorization = await wallet.signAuthorization({
     contractAddress: laneAccountImpl,
-    executor: 'self',
+    nonce: nonce + 1,
   });
 
   const hash = await wallet.sendTransaction({
     authorizationList: [authorization],
     to: trader.address,
     data: '0x',
+    nonce,
   });
   console.log(`\nEIP-7702 authorization sent: ${explorerTx(hash)}`);
 
@@ -56,7 +65,12 @@ async function main() {
   }
 
   console.log(`\nDelegated. ${trader.address} keeps its address and balance but now runs LaneAccount.`);
-  console.log('This consumed the trading account\'s EVM nonce once. It should not need to again.');
+  // Self-sponsored: the transaction consumes one nonce, then the authorization
+  // (signed over nonce+1) consumes another. Only a sponsored delegation costs one.
+  console.log(
+    `This advanced the trading account's EVM nonce from ${nonce} to ${nonce + 2}, once for ` +
+      'the transaction and once for the authorization. It should not need to again.',
+  );
 }
 
 main().catch((error) => {

@@ -17,8 +17,9 @@ import { decodeLaneNonce } from './userop.js';
  *
  * Sequences are tracked locally after a single batched read at startup, so the
  * hot path never calls `eth_getTransactionCount` or `getNonce`. That matters on
- * Sei in particular, where `eth_getTransactionCount(addr, "pending")` returns the
- * same value as `"latest"` and cannot be used to discover in-flight nonces.
+ * Sei in particular, where a pending nonce that differs from the confirmed nonce
+ * is documented as unreliable, so no in-flight count can be recovered from a
+ * node afterwards. Tracking what was issued is the only dependable record.
  */
 export class LanePool {
   private readonly nextSeq = new Map<bigint, bigint>();

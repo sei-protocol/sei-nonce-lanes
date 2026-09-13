@@ -281,10 +281,14 @@ async function main() {
   );
   const estimatedCallGas = gasEstimates.reduce((max, value) => (value > max ? value : max), 0n);
   const recommendedCallGas = (estimatedCallGas * 125n + 99n) / 100n;
+  const configuredCallGas = config.callGasLimit;
   const callGasLimit =
-    config.callGasLimit > recommendedCallGas ? config.callGasLimit : recommendedCallGas;
+    configuredCallGas !== undefined && configuredCallGas > recommendedCallGas
+      ? configuredCallGas
+      : recommendedCallGas;
   console.log(
-    `call gas       ${callGasLimit} (max estimate ${estimatedCallGas}, configured ${config.callGasLimit})`,
+    `call gas       ${callGasLimit} (max estimate ${estimatedCallGas}` +
+      `${configuredCallGas === undefined ? '' : `, CALL_GAS_LIMIT floor ${configuredCallGas}`})`,
   );
   const maxFeePerGas = fees.maxFeePerGas * 2n;
   const maxPriorityFeePerGas = fees.maxPriorityFeePerGas * 2n;
@@ -308,6 +312,10 @@ async function main() {
   console.log(
     `prefund bound   <=${formatEther(maxRunPrefund)} SEI for ${unresolvedSwapCount} unresolved swap(s)`,
   );
+  // Signing is the point of no return for these lanes, so re-check that this
+  // process still owns the sender rather than trusting the earlier acquisition.
+  await activeSenderLock?.assertHeld();
+
   const runId = BigInt(Date.now());
   const signStart = Date.now();
   const pendings = await Promise.all(

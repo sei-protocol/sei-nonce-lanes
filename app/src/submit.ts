@@ -138,10 +138,14 @@ async function main() {
     data: probeAccountCall,
   });
   const recommendedCallGas = (estimatedCallGas * 125n + 99n) / 100n;
+  const configuredCallGas = config.callGasLimit;
   const callGasLimit =
-    config.callGasLimit > recommendedCallGas ? config.callGasLimit : recommendedCallGas;
+    configuredCallGas !== undefined && configuredCallGas > recommendedCallGas
+      ? configuredCallGas
+      : recommendedCallGas;
   console.log(
-    `call gas       ${callGasLimit} (estimate ${estimatedCallGas}, configured ${config.callGasLimit})`,
+    `call gas       ${callGasLimit} (estimate ${estimatedCallGas}` +
+      `${configuredCallGas === undefined ? '' : `, CALL_GAS_LIMIT floor ${configuredCallGas}`})`,
   );
 
   const lanePool = await LanePool.create(publicClient, ENTRY_POINT, trader.address, config.lanePoolSize);
@@ -210,6 +214,10 @@ async function main() {
   if (queued.length > 0) console.log(`requeued       ${queued.length} durable pending op(s)`);
 
   const ordersToBuild = Math.min(Math.max(config.orders - built.length, 0), lanePool.idleCount);
+
+  // Signing is the point of no return for these lanes, so re-check that this
+  // process still owns the sender rather than trusting the earlier acquisition.
+  await activeSenderLock?.assertHeld();
 
   const signStart = Date.now();
   const pendings = await Promise.all(

@@ -1,9 +1,9 @@
-import { randomUUID } from 'node:crypto';
-import { mkdir, open as openFile, readFile, rename, unlink, writeFile } from 'node:fs/promises';
+import { mkdir, open as openFile, readFile, rename } from 'node:fs/promises';
 import type { FileHandle } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import type { Address, Hex } from 'viem';
 import type { PendingOp } from './bundling-queue.js';
+import { FileLock, hasErrorCode } from './file-lock.js';
 
 export type JournalContext = {
   chainId: number;
@@ -70,7 +70,7 @@ export type RecoveryBundle = {
 export class OperationJournal {
   private writeChain: Promise<void> = Promise.resolve();
   private writeSequence = 0;
-  private lock?: { handle: FileHandle; path: string; token: string };
+  private lock?: FileLock;
 
   private constructor(
     private readonly path: string,
@@ -119,54 +119,17 @@ export class OperationJournal {
    */
   async acquireLock(): Promise<void> {
     if (this.lock) throw new Error('operation journal is already locked by this process');
-
-    await mkdir(dirname(this.path), { recursive: true });
-    const path = `${this.path}.lock`;
-    for (;;) {
-      const token = randomUUID();
-      try {
-        const handle = await openFile(path, 'wx', 0o600);
-        try {
-          await handle.writeFile(
-            JSON.stringify({ pid: process.pid, token, createdAt: Date.now() }) + '\n',
-            'utf8',
-          );
-          await handle.sync();
-        } catch (error) {
-          await handle.close();
-          await unlink(path).catch(() => undefined);
-          throw error;
-        }
-        this.lock = { handle, path, token };
-        return;
-      } catch (error) {
-        if (!hasErrorCode(error, 'EEXIST')) throw error;
-      }
-
-      const owner = await readLock(path);
-      if (owner && isProcessAlive(owner.pid)) {
-        throw new Error(`another submission process (pid ${owner.pid}) owns ${path}`);
-      }
-
-      // A crash leaves the lock file behind. Remove it only after confirming
-      // that its recorded process no longer exists, then retry the atomic open.
-      await unlink(path).catch((error) => {
-        if (!isFileNotFound(error)) throw error;
-      });
-    }
+    this.lock = await FileLock.acquire(`${this.path}.lock`, {
+      heldMessage: (owner, path) =>
+        `another submission process (pid ${owner.pid}) owns ${path}`,
+    });
   }
 
   async releaseLock(): Promise<void> {
     const lock = this.lock;
     if (!lock) return;
     this.lock = undefined;
-    await lock.handle.close();
-
-    const owner = await readLock(lock.path);
-    if (owner?.token !== lock.token) return;
-    await unlink(lock.path).catch((error) => {
-      if (!isFileNotFound(error)) throw error;
-    });
+    await lock.release();
   }
 
   queuedOps(): PendingOp[] {
@@ -288,16 +251,48 @@ export class OperationJournal {
   private persist(): Promise<void> {
     const sequence = this.writeSequence++;
     this.writeChain = this.writeChain.then(async () => {
+      // Overwriting a journal this process no longer owns is the corruption the
+      // lock exists to prevent, so confirm ownership rather than assume it.
+      await this.lock?.assertHeld();
+
       // Snapshot only when this write reaches the front of the chain. Creating
       // snapshots eagerly retains one full journal string per concurrent
       // relayer and can exhaust the Node heap for wide bundles.
       const snapshot = JSON.stringify(this.state, replaceBigInt, 2) + '\n';
-      await mkdir(dirname(this.path), { recursive: true });
+      const directory = dirname(this.path);
+      await mkdir(directory, { recursive: true });
       const temporary = `${this.path}.${process.pid}.${sequence}.tmp`;
-      await writeFile(temporary, snapshot, { encoding: 'utf8', mode: 0o600 });
+      const handle = await openFile(temporary, 'w', 0o600);
+      try {
+        await handle.writeFile(snapshot, 'utf8');
+        // Reaching the page cache survives a crashed process but not a crashed
+        // kernel, and the second is the case a write-ahead log exists for.
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
       await rename(temporary, this.path);
+      await syncDirectory(directory);
     });
     return this.writeChain;
+  }
+}
+
+/** Make the rename durable too. Not every platform allows it; a refusal is not fatal. */
+async function syncDirectory(path: string): Promise<void> {
+  let handle: FileHandle;
+  try {
+    handle = await openFile(path, 'r');
+  } catch {
+    return;
+  }
+  try {
+    await handle.sync();
+  } catch (error) {
+    const tolerated = ['EINVAL', 'EISDIR', 'EPERM', 'EACCES', 'ENOTSUP', 'EBADF'];
+    if (!tolerated.some((code) => hasErrorCode(error, code))) throw error;
+  } finally {
+    await handle.close();
   }
 }
 
@@ -394,29 +389,4 @@ function reviveBigInt(_key: string, value: unknown): unknown {
 
 function isFileNotFound(error: unknown): boolean {
   return hasErrorCode(error, 'ENOENT');
-}
-
-async function readLock(path: string): Promise<{ pid: number; token: string } | undefined> {
-  try {
-    const value = JSON.parse(await readFile(path, 'utf8')) as { pid?: unknown; token?: unknown };
-    if (typeof value.pid !== 'number' || typeof value.token !== 'string') return undefined;
-    return { pid: value.pid, token: value.token };
-  } catch (error) {
-    if (isFileNotFound(error)) return undefined;
-    return undefined;
-  }
-}
-
-function isProcessAlive(pid: number): boolean {
-  if (!Number.isInteger(pid) || pid <= 0) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return hasErrorCode(error, 'EPERM');
-  }
-}
-
-function hasErrorCode(error: unknown, code: string): boolean {
-  return error instanceof Error && 'code' in error && error.code === code;
 }

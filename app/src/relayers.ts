@@ -203,12 +203,17 @@ export class RelayerPool {
   ): Promise<BundleResult> {
     const ops = bundle.map((p) => p.op);
     const args = [ops, relayer.account.address] as const;
+    // The address, not the account object. viem prepares a full transaction
+    // request for a local account, which adds a chain-id read, a fee lookup and
+    // an `eth_getTransactionCount(addr, "pending")` before the estimate itself.
+    // All three are discarded here, and the nonce read is both the call this
+    // hot path is built to avoid and one Sei documents as unreliable.
     const base = {
       address: this.entryPoint,
       abi: entryPointAbi,
       functionName: 'handleOps',
       args,
-      account: relayer.account,
+      account: relayer.account.address,
     } as const;
 
     const txNonce = previousAttempts.at(-1)?.nonce ?? relayer.nonce;

@@ -38,6 +38,16 @@ export function readInteger(
   return value;
 }
 
+/** Reads an integer that has no default, so the caller can tell "unset" from a value. */
+export function readOptionalInteger(
+  env: EnvSource,
+  name: string,
+  options: IntegerOptions = {},
+): number | undefined {
+  if (!env[name]?.trim()) return undefined;
+  return readInteger(env, name, 0, options);
+}
+
 /**
  * Reads an integer that used to be spelled differently, so an existing `.env` or
  * a published tutorial keeps working after a rename. `name` wins when both are

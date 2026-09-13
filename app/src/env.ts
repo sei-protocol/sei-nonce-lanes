@@ -14,6 +14,7 @@ import {
   readInteger,
   readMnemonic,
   readOptionalAddress,
+  readOptionalInteger,
   readPrivateKey,
   readRenamedInteger,
   readRpcUrl,
@@ -29,7 +30,25 @@ export const chain = configuredChainId === 1329 ? sei : seiTestnet;
 export const rpcUrl = readRpcUrl(process.env, chain.rpcUrls.default.http[0]!);
 export const allowMainnet = readFlag(process.env, 'ALLOW_MAINNET');
 
-export const publicClient = createPublicClient({ chain, transport: http(rpcUrl) });
+/**
+ * Sei produces blocks in well under a second, and viem's 4s default polling
+ * interval would add up to a full four seconds of dead wait to every receipt.
+ * Neither `sei` nor `seiTestnet` carries a block time for viem to derive one
+ * from, so set it here or `waitForTransactionReceipt` reports timeouts and
+ * triggers fee-bumped replacements for bundles that already landed.
+ */
+export const receiptPollingIntervalMs = readInteger(
+  process.env,
+  'RECEIPT_POLLING_INTERVAL_MS',
+  250,
+  { min: 10, max: 60_000 },
+);
+
+export const publicClient = createPublicClient({
+  chain,
+  transport: http(rpcUrl),
+  pollingInterval: receiptPollingIntervalMs,
+});
 
 /** Safe for logs: preserves the host but hides credential-bearing URL paths. */
 export function displayRpcUrl(url: string = rpcUrl): string {
@@ -120,7 +139,13 @@ export const config = {
   verificationGasLimit: BigInt(
     readInteger(process.env, 'VERIFICATION_GAS_LIMIT', 150_000, { min: 1 }),
   ),
-  callGasLimit: BigInt(readInteger(process.env, 'CALL_GAS_LIMIT', 500_000, { min: 1 })),
+  /**
+   * Floor for each operation's declared call gas, or unset to use the measured
+   * estimate. The EntryPoint reserves the declared limit before running an
+   * operation, so an inflated value consumes block gas limit, and therefore
+   * operations per block, without changing the gas actually used.
+   */
+  callGasLimit: readOptionalCallGasLimit(),
   preVerificationGas: BigInt(
     readInteger(process.env, 'PRE_VERIFICATION_GAS', 60_000, { min: 1 }),
   ),
@@ -135,6 +160,11 @@ export const config = {
     { min: 10, max: 1_000 },
   ),
 } as const;
+
+function readOptionalCallGasLimit(): bigint | undefined {
+  const value = readOptionalInteger(process.env, 'CALL_GAS_LIMIT', { min: 1 });
+  return value === undefined ? undefined : BigInt(value);
+}
 
 export const relayerFunding = parseSeiAmount('RELAYER_FUNDING', '0.5');
 export const entryPointDeposit = parseSeiAmount('ENTRYPOINT_DEPOSIT', '1');
