@@ -137,6 +137,100 @@ test('restart gets a fresh same-nonce replacement budget after eviction', async 
   }
 });
 
+test('a fresh bundle keeps one journal bundle id across in-process replacements', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'sei-relayer-replace-'));
+  const broadcasts: Hex[] = [];
+  const server = createServer(async (request, response) => {
+    let body = '';
+    for await (const chunk of request) body += chunk;
+    const payload = JSON.parse(body) as { id: number; method: string; params?: unknown[] };
+    if (payload.method !== 'eth_sendRawTransaction') {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(
+        JSON.stringify({
+          jsonrpc: '2.0',
+          id: payload.id,
+          error: { code: -32601, message: `unsupported method ${payload.method}` },
+        }),
+      );
+      return;
+    }
+    const raw = payload.params?.[0] as Hex;
+    broadcasts.push(raw);
+    response.writeHead(200, { 'content-type': 'application/json' });
+    response.end(JSON.stringify({ jsonrpc: '2.0', id: payload.id, result: keccak256(raw) }));
+  });
+
+  try {
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(0, '127.0.0.1', resolve);
+    });
+    const address = server.address() as AddressInfo;
+    const rpcUrl = `http://127.0.0.1:${address.port}`;
+
+    const account = mnemonicToAccount(MNEMONIC);
+    const pending = makePending();
+    const journal = await OperationJournal.open(join(directory, 'pending.json'), {
+      chainId: seiTestnet.id,
+      entryPoint: ENTRY_POINT,
+      sender: SENDER,
+    });
+    await journal.add([pending]);
+
+    // Every receipt wait times out and nothing is ever found mined, so the worker
+    // must sign a fee-bumped replacement at the same nonce within this process.
+    const publicClient = {
+      getTransactionCount: async () => 7,
+      getTransactionReceipt: async () => {
+        throw new Error('transaction not found');
+      },
+      waitForTransactionReceipt: async () => {
+        throw new Error('receipt timeout');
+      },
+      readContract: async () => laneNonce(pending.lane, pending.seq),
+      estimateContractGas: async () => 500_000n,
+      estimateFeesPerGas: async () => ({ maxFeePerGas: 100n, maxPriorityFeePerGas: 10n }),
+      getBlock: async () => ({ gasLimit: 12_500_000n }),
+      getBlockNumber: async () => 100n,
+    } as unknown as PublicClient;
+
+    const pool = await RelayerPool.create([account], publicClient, seiTestnet, rpcUrl, ENTRY_POINT, {
+      journal,
+      receiptTimeoutMs: 1,
+      maxAttempts: 3,
+      feeBumpPercent: 25,
+    });
+
+    const queue = { takeBundle: (() => {
+      let taken = false;
+      return () => {
+        if (taken) return [];
+        taken = true;
+        return [pending];
+      };
+    })() };
+    const [result] = await pool.drain(queue as unknown as Parameters<typeof pool.drain>[0], 1);
+    assert.ok(result);
+    assert.equal(result.mined, false);
+    assert.equal(result.pending, true);
+
+    // Three same-nonce attempts, one bundle id, ascending fees, nothing at nonce 8.
+    const [recovery, ...others] = journal.recoveryBundles();
+    assert.ok(recovery);
+    assert.equal(others.length, 0);
+    assert.equal(recovery.attempts.length, 3);
+    assert.deepEqual(recovery.attempts.map((attempt) => attempt.nonce), [7, 7, 7]);
+    assert.ok(recovery.attempts[1]!.maxFeePerGas > recovery.attempts[0]!.maxFeePerGas);
+    assert.ok(recovery.attempts[2]!.maxFeePerGas > recovery.attempts[1]!.maxFeePerGas);
+    assert.equal(new Set(recovery.attempts.map((attempt) => attempt.bundleId)).size, 1);
+    assert.equal(broadcasts.length, 3);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 async function makeAttempt(
   account: ReturnType<typeof mnemonicToAccount>,
   pending: PendingOp,

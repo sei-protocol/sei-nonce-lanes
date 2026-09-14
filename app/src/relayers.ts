@@ -312,7 +312,6 @@ export class RelayerPool {
       attempts.length > 0
         ? maxBigInt(attempts.at(-1)!.maxPriorityFeePerGas, networkMaxPriorityFeePerGas)
         : networkMaxPriorityFeePerGas;
-    const bundleId = attempts.at(-1)?.bundleId;
 
     // The retry budget is per invocation, not the lifetime attempt count in the
     // journal. Otherwise a bundle that exhausted its budget before a restart
@@ -323,6 +322,10 @@ export class RelayerPool {
         maxPriorityFeePerGas = bumpFee(maxPriorityFeePerGas, this.options.feeBumpPercent);
       }
 
+      // Every attempt at this nonce belongs to one bundle, including the first
+      // replacement of a bundle that was fresh when this invocation started.
+      // Read the id inside the loop: the first attempt of a fresh bundle mints it,
+      // and the journal refuses a second id for the same operations.
       const attempt = await this.signAttempt(
         relayer,
         args,
@@ -330,7 +333,7 @@ export class RelayerPool {
         outerGasLimit,
         maxFeePerGas,
         maxPriorityFeePerGas,
-        bundleId,
+        attempts.at(-1)?.bundleId,
       );
       // WAL ordering is deliberate: signed bytes reach disk before the network.
       await this.options.journal?.recordAttempt(bundle, attempt);
