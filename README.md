@@ -47,6 +47,7 @@ The expected EntryPoint is the canonical v0.8 singleton at
 - [Commands](#commands)
 - [Configuration](#configuration)
 - [Tuning](#tuning)
+- [Benchmarks](#benchmarks)
 - [Security and production limitations](#security-and-production-limitations)
 - [Troubleshooting](#troubleshooting)
 - [References and versions](#references-and-versions)
@@ -230,6 +231,12 @@ remains single-threaded.
 │   │   ├── swap-submit.ts       Real-swap orchestrator and report
 │   │   ├── userop.ts            UserOperation packing, hashing, and signing
 │   │   └── *.test.ts            Unit tests, colocated with what they cover
+│   ├── bench/
+│   │   ├── lanes-tps.ts         submit.ts measured instead of reported per order
+│   │   ├── baseline-tps.ts      One EOA with sequential nonces: serial, pipelined, gap, batch, fleet
+│   │   ├── block-report.ts      Read-only chain-side view of a block range
+│   │   ├── rpc-latency.ts       Warm request latency, configured RPC vs public
+│   │   └── sweep.sh             Runs lanes-tps.ts over relayer x width combinations
 │   ├── scripts/diagram.mjs      Generates the architecture SVG
 │   ├── tsconfig.json            Strict TypeScript configuration
 │   └── package.json             CLI and verification scripts
@@ -642,6 +649,11 @@ Run npm commands from `app/`.
 | `npm run swap:setup` | Yes | Approve native USDC and seed the Atlantic-2 DragonSwap V1 pair |
 | `npm run swap:submit` | Yes | Submit alternating real SEI/native-USDC swaps through nonce lanes |
 | `npm run baseline` | Yes | Probe sequential EVM nonce-gap behavior with a gas-only relayer |
+| `npm run bench:lanes` | Yes | Measure lane throughput for the configured run shape; append one JSON record |
+| `npm run bench:baseline` | Yes | Measure one EOA with sequential nonces against the same venue call |
+| `npm run bench:sweep -- <label> "R W [ORDERS]" ...` | Yes | Run `bench:lanes` over relayer-count and bundle-width combinations |
+| `npm run bench:report` | No | Per-block ops, bundles, and gas utilisation for a block range |
+| `npm run bench:latency` | No | Warm RPC request latency, configured endpoint vs public |
 | `npm run diagram` | No chain write | Regenerate `assets/how-it-works.svg` |
 | `npm test` | No | Run Node unit tests |
 | `npm run typecheck` | No | Run strict TypeScript checks |
@@ -765,6 +777,13 @@ rejects a bundle when its estimate cannot fit. On Atlantic-2 on September 3,
 produced the best observed submission rate, 47.7 landed swaps/second. These are
 measurements for this call shape and network state, not stable protocol limits.
 
+The mock venue is a heavier call. On September 14, 2026, with `CALL_GAS_LIMIT`
+unset, each `place` operation used about 331,000 gas of outer transaction gas,
+so 36 operations was the widest bundle that fit and 37 failed safely in
+simulation. Widths 8, 16, and 36 packed 4, 2, and 1 bundles into a
+12,500,000-gas block; width 9, which should fit 4, landed 3. See
+[Benchmarks](#benchmarks).
+
 ### Relayer count
 
 Each relayer has one sequential outer transaction stream. Under favorable
@@ -777,6 +796,12 @@ RELAYER_COUNT * MAX_OPS_PER_BUNDLE
 That is a planning heuristic, not a throughput guarantee. RPC latency, block
 limits, state contention, gas, and producer policy still apply.
 
+One relayer's bundle cycle is five sequential RPC round trips (gas estimate,
+fee estimate, block number, broadcast, receipt poll) plus inclusion, about
+1.5 s on a 120 ms endpoint. Below roughly 120 operations in flight the pool
+is the bottleneck and throughput scales with `RELAYER_COUNT`; above it, block
+gas is.
+
 ### Submission concurrency is not execution parallelism
 
 Independent nonce lanes remove ordering between submissions. They do not make
@@ -785,6 +810,115 @@ conflicting storage writes execute in parallel.
 The mock venue stores orders by `orderId`, but also updates a global landing
 counter for test observability. It is deliberately not a parallel-execution
 benchmark. A real venue integration must analyze its own storage contention.
+
+## Benchmarks
+
+`app/bench/` measures the lane path against the thing it replaces: one EOA
+sending ordinary transactions with sequential nonces. Every mode calls the same
+`MockPerpVenue.place` on the configured `VENUE`, so the numbers differ only in
+how the calls were submitted. All commands read the root `.env`; the two that
+write also honor the run-shape variables above, with the shell environment
+taking precedence.
+
+```bash
+cd app
+
+# Lane throughput for one run shape. Same safety path as `submit`, outcomes
+# from the bundle receipts instead of per-order reads, one JSON line appended
+# to app/.state/bench/lanes-results.jsonl.
+ORDERS=1024 LANE_POOL_SIZE=1024 MAX_OPS_PER_BUNDLE=16 RELAYER_COUNT=16 \
+REVERT_ORDER_INDEX=-1 BENCH_LABEL="16x16" npm run bench:lanes
+
+# The same, over several relayer-count x bundle-width combinations. ORDERS
+# defaults to clamp(R * W * 8, 32, 1024); a third number overrides it.
+BUNDLE_RECEIPT_TIMEOUT_MS=60000 npm run bench:sweep -- sat "32 8" "16 16" "16 36"
+
+# The normal case: the trader itself, sequential nonces from one confirmed read.
+BENCH_MODE=serial        BENCH_TXS=30   npm run bench:baseline
+BENCH_MODE=pipelined     BENCH_TXS=200  npm run bench:baseline
+BENCH_MODE=batch         BENCH_TXS=1024 npm run bench:baseline
+BENCH_MODE=pipelined-gap BENCH_TXS=100  BENCH_GAP_INDEX=50 npm run bench:baseline
+BENCH_MODE=fleet         BENCH_TXS=64   BENCH_FLEET_SIZE=8 BENCH_FUND_SEI=4 npm run bench:baseline
+
+# What the chain included, block by block, independent of any client clock.
+REPORT_FROM_BLOCK=270943931 REPORT_TO_BLOCK=270943961 npm run bench:report
+npm run bench:latency
+```
+
+`bench:lanes` shares the sender-wide run lock with `submit` and `swap:submit`
+but keeps its own journal in `app/.state/bench/`, so a benchmark never replays
+the tutorial's pending operations; if a `submit` run was interrupted, recover it
+with `npm run submit` first. `bench:baseline` modes:
+
+| `BENCH_MODE` | What it does |
+| --- | --- |
+| `serial` | Send one transaction, wait for its receipt, send the next |
+| `pipelined` | Sign all `BENCH_TXS`, broadcast in nonce order without waiting; `BENCH_CONCURRENCY` > 1 lets requests overtake each other on the wire |
+| `pipelined-gap` | `pipelined`, but the transaction at `BENCH_GAP_INDEX` is never broadcast; shows what one lost transaction does to the queue, then repairs it |
+| `batch` | All `BENCH_TXS` in one JSON-RPC batch request |
+| `fleet` | `BENCH_FLEET_SIZE` wallets derived from `RELAYER_MNEMONIC` at `BENCH_WALLET_START_INDEX + 1..`, funded to `BENCH_FUND_SEI` by the trader, each running `pipelined` at once |
+| `all` | The five above in order |
+
+`BENCH_SENDER=bench` uses a derived wallet at `BENCH_WALLET_START_INDEX`
+(default `100`) instead of the trader. Every mode appends a record to
+`app/.state/bench/baseline-results.jsonl`, and `BENCH_LABEL` tags it.
+`bench:report` takes `REPORT_FROM_BLOCK`/`REPORT_TO_BLOCK` or
+`REPORT_TX_HASHES`, an optional `REPORT_SENDER` filter, and `REPORT_JSON=1`.
+
+### Measured on Atlantic-2, September 14, 2026
+
+Block gas limit 12,500,000; base fee 50 gwei plus a 1 gwei tip; about 2.0
+blocks per second under load (2.5 idle); 120 ms warm request latency to the
+configured endpoint. Each direct `place` transaction used 328,425 gas and each
+lane operation about 331,000 gas of outer transaction gas, so the block gas
+limit admits 36 to 38 operations per block however they are submitted: roughly
+73 landed operations per second for this call shape. Chain-side rates below
+divide landed operations by the block-timestamp span, which Sei stamps in whole
+seconds; client-side rates divide by wall time from first broadcast to last
+receipt.
+
+| Submission | Landed ops/s, chain-side | Client-side | Block gas used, average |
+| --- | --- | --- | --- |
+| One EOA, serial send and wait (30 tx) | 1.0 | 1.0 | |
+| One EOA, pipelined, one request in flight (200 tx) | 6.9 | 6.7 | |
+| Tutorial lanes, 4 relayers x 4 per bundle (24 ops) | 8.0 | 5.7 | 11% |
+| Fleet of 4 wallets x 100 tx | 26.7 | 24.8 | |
+| Fleet of 8 wallets x 64 tx | 51.2 | 49.7 | 54% |
+| One EOA, 1024 tx in one JSON-RPC batch | 51.2 | 47.3 | 68% |
+| Lanes, 32 relayers x 8 per bundle (1024 ops) | 60.2 | 55.3 | 83% |
+| Lanes, 16 relayers x 16 per bundle (1024 ops) | 64.0 | 54.6 | 81% |
+| Lanes, 16 relayers x 36 per bundle (1024 ops) | 64.0 | 55.1 | 88% |
+
+What the numbers say:
+
+- Raw throughput is bounded by block gas, not by the nonce model. Lanes came
+  closest to the ceiling (28 of 31 blocks at least 90% full in the 16 x 36
+  run) from one address whose EVM nonce never moved. A single ordered queue
+  matched the fleet only when every transaction left in one JSON-RPC batch;
+  one request at a time it is bounded by the round trip, about 7 per second.
+- Small relayer pools are client-bound: 4 relayers landed 2.7, 8.9, 15.3,
+  24.3, 45.4, and 50.5 ops/s at widths 1, 4, 8, 16, 32, and 36, and width 4
+  landed 2.2, 8.9, 15.4, 27.9, and 47.2 ops/s with 1, 4, 8, 16, and 32
+  relayers.
+- One lost transaction in the sequential queue (`pipelined-gap`, nonce 50 of
+  100) left the 49 transactions behind it accepted but unmined until the
+  client resent it 15 s later. In the lane runs the deliberately reverting
+  order consumed only its own lane while the rest of its bundle landed.
+- `npm run baseline` gave different verdicts for two Atlantic-2 RPC paths on
+  the same day: a dedicated provider queued the gapped transaction and released
+  it once the gap filled, while the public endpoint returned a hash and then
+  dropped it, so it never landed even after the gap was filled. Probe the path
+  you will actually use.
+- Wide bundles queue behind each other because only one 11.7M-gas bundle fits
+  a block. With more than about 8 relayers at width 32 or 36, receipt waits
+  exceed the default `BUNDLE_RECEIPT_TIMEOUT_MS`; raise it for those shapes
+  rather than paying for fee-bumped replacements of bundles that will land.
+
+These are measurements of one call shape, one network state, and one client
+machine, not protocol limits. Cost was about 0.02 SEI per landed operation at
+the effective 52 gwei. The raw records and per-run logs are under
+`app/.state/bench/`, which is ignored by Git and, for `bench:lanes`, contains
+a journal that should be treated like `pending-ops.json`.
 
 ## Security and production limitations
 

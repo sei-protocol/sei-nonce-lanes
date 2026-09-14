@@ -11,7 +11,7 @@
 # path from any URL viem embeds in an error dump, since RPC paths often carry keys.
 set -u
 cd "$(dirname "$0")/.." || exit 1
-label="${1:?label}"; shift
+label="${1:?usage: npm run bench:sweep -- <label> \"RELAYERS WIDTH [ORDERS]\" ...}"; shift
 mkdir -p .state/bench/logs
 pause="${SWEEP_PAUSE_SECONDS:-5}"
 
