@@ -1,0 +1,16 @@
+{
+  "name": "standalone-entrypoint-v08-deployer",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "deploy": "node deploy.mjs",
+    "test": "node --test deploy.test.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "viem": "2.56.3"
+  }
+}
